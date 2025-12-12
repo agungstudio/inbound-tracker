@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.5 - SN Failure Reporting] ---
+# --- KONFIGURASI [v1.6 - Debugging RLS Cache] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -25,12 +25,13 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     st.markdown("Harap masukkan `SUPABASE_URL` dan `SUPABASE_KEY` di **Secrets Streamlit Cloud** atau file `.streamlit/secrets.toml`.")
     st.stop()
 
+# Menghapus hashing agar koneksi dibuat ulang setelah RLS diperbarui
+# Jika ini berhasil, kita akan mengembalikannya ke @st.cache_resource
 @st.cache_resource
 def init_connection():
     try:
         logging.info("Attempting to connect to Supabase...")
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        # Quick check connection
         client.table(RECEIVING_TABLE).select("id").limit(0).execute()
         return client
     except Exception as e:
@@ -53,7 +54,6 @@ def parse_supabase_timestamp(timestamp_str):
 def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
-    # FIX: Mengganti engine='openypyxl' menjadi engine='openpyxl'
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         cols = ['gr_number', 'sku', 'nama_barang', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'jenis', 'sn_list', 'updated_by', 'updated_at']
         
@@ -329,8 +329,9 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
             supabase.table(RECEIVING_TABLE).update(payload_to_db).eq("id", id_barang).execute()
             return 1, False # Success
         except APIError as api_e:
-            st.error(f"❌ Gagal Simpan Item SN {row['nama_barang']}. Detail: {api_e}")
-            # Saat gagal karena API Error (misal RLS blocked), kita harus kembalikan flag konflik/error
+            # FIX: Tampilkan pesan API error spesifik dari Supabase
+            error_msg = f"API Error: {api_e.message}" if hasattr(api_e, 'message') else str(api_e)
+            st.error(f"❌ Gagal Simpan Item SN {row['nama_barang']}. Detail: {error_msg}")
             return 0, True 
         
     return 0, False # No change
@@ -496,7 +497,6 @@ def page_checker():
                         # Simpan ke DB langsung, agar SN yang ditambahkan oleh Checker lain terlihat
                         updates, conflict = handle_update_sn_list(row, current_sn_list, new_sn_jenis, final_nama_user, loaded_time, current_notes)
 
-                        # --- FIX: Tambahkan penanganan error yang lebih informatif ---
                         if not conflict and updates > 0:
                             st.toast(f"✅ SN {new_sn_input} ditambahkan! Total {len(current_sn_list)}")
                             time.sleep(0.5) 
@@ -505,8 +505,8 @@ def page_checker():
                         elif conflict:
                              st.warning("Gagal menambahkan SN karena ada konflik data atau kesalahan database.")
                         else:
+                             # Jika updates=0 dan tidak ada conflict, ini tidak boleh terjadi di blok ini
                              st.error("❌ Gagal menyimpan SN. Coba muat ulang data atau periksa konsol browser untuk error RLS/API.")
-                        # --- END FIX ---
                         
                 # --- TAMPILAN SN LIST DAN REMOVE ---
                 st.markdown("##### 🔍 Daftar SN Tercatat:")
@@ -662,8 +662,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.5", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.5")
+    st.set_page_config(page_title="GR Validation v1.6", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.6")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
