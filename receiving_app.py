@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.4 - Robust NaN Fix] ---
+# --- KONFIGURASI [v1.5 - SN Failure Reporting] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -330,6 +330,7 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
             return 1, False # Success
         except APIError as api_e:
             st.error(f"❌ Gagal Simpan Item SN {row['nama_barang']}. Detail: {api_e}")
+            # Saat gagal karena API Error (misal RLS blocked), kita harus kembalikan flag konflik/error
             return 0, True 
         
     return 0, False # No change
@@ -495,13 +496,17 @@ def page_checker():
                         # Simpan ke DB langsung, agar SN yang ditambahkan oleh Checker lain terlihat
                         updates, conflict = handle_update_sn_list(row, current_sn_list, new_sn_jenis, final_nama_user, loaded_time, current_notes)
 
+                        # --- FIX: Tambahkan penanganan error yang lebih informatif ---
                         if not conflict and updates > 0:
                             st.toast(f"✅ SN {new_sn_input} ditambahkan! Total {len(current_sn_list)}")
                             time.sleep(0.5) 
                             st.session_state[sn_input_key] = "" # Clear input
                             st.rerun()
                         elif conflict:
-                             st.warning("Gagal menambahkan SN karena ada konflik data.")
+                             st.warning("Gagal menambahkan SN karena ada konflik data atau kesalahan database.")
+                        else:
+                             st.error("❌ Gagal menyimpan SN. Coba muat ulang data atau periksa konsol browser untuk error RLS/API.")
+                        # --- END FIX ---
                         
                 # --- TAMPILAN SN LIST DAN REMOVE ---
                 st.markdown("##### 🔍 Daftar SN Tercatat:")
@@ -657,8 +662,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.4", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.4")
+    st.set_page_config(page_title="GR Validation v1.5", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.5")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
