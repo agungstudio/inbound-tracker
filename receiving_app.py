@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.23 - Inbound Status Control] ---
+# --- KONFIGURASI [v1.24 - Robust Filtering Fix] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -110,10 +110,8 @@ def get_data(gr_number=None, search_term=None, only_active=True):
 
     # FIX V1.23: Handle missing is_inbound column if SQL hasn't been run
     select_fields = "*"
-    if 'is_inbound' not in supabase.table(RECEIVING_TABLE).select("is_inbound").limit(0).execute().data:
-        select_fields = "*, false as is_inbound"
-    query = supabase.table(RECEIVING_TABLE).select(select_fields)
-    
+    query = supabase.table(RECEIVING_TABLE).select(select_fields) # Apply previous filters
+
     start_time = datetime.now(timezone.utc)
     try:
         response = query.order("nama_barang").execute()
@@ -123,6 +121,20 @@ def get_data(gr_number=None, search_term=None, only_active=True):
         
     df = pd.DataFrame(response.data)
 
+    # FIX V1.24: Explicitly define columns for empty DF to avoid KeyError later
+    required_cols = [
+        'id', 'gr_number', 'sku', 'nama_barang', 'kategori_barang', 'qty_po', 
+        'qty_fisik', 'jenis', 'sn_list', 'keterangan', 'updated_by', 'is_active', 'is_inbound'
+    ]
+    if df.empty:
+        # Create an empty DF with necessary columns
+        df = pd.DataFrame(columns=required_cols)
+    else:
+        # Ensure all required columns exist (for safety, especially for 'is_inbound')
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = False if col in ['is_active', 'is_inbound'] else None 
+        
     # Pastikan is_inbound ada di DF (default false jika tidak ada di DB)
     if 'is_inbound' not in df.columns: df['is_inbound'] = False
     if 'keterangan' not in df.columns: df['keterangan'] = ""
@@ -976,8 +988,9 @@ def page_admin():
         # Ambil semua data AKTIF yang sudah divalidasi tetapi BELUM Inbound
         df_inbound_pending = get_data(only_active=True)
         # Filter: qty_fisik > 0 DAN is_inbound == False
+        # FIX V1.24: Explicitly cast qty_fisik to integer before filtering
         df_inbound_pending = df_inbound_pending[
-            (df_inbound_pending['qty_fisik'] > 0) & 
+            (df_inbound_pending['qty_fisik'].astype(int) > 0) & 
             (df_inbound_pending['is_inbound'] == False)
         ].copy()
         
@@ -999,24 +1012,29 @@ def page_admin():
             
             if selected_inbound_item != "-- Pilih Item --":
                 # Mendapatkan ID dari baris yang dipilih
-                item_details = df_inbound_pending[
-                    (df_inbound_pending['gr_number'] == selected_inbound_item.split(' | ')[0].strip()) &
-                    (df_inbound_pending['sku'] == selected_inbound_item.split('SKU: ')[1].strip())
-                ].iloc[0]
-                
-                if st.button(f"✅ KONFIRMASI INBOUND: {item_details['nama_barang']}", type="primary"):
-                    # Nama Admin (dari sidebar)
-                    admin_name = st.session_state[SESSION_KEY_CHECKER]
-                    if admin_name == "-- Pilih Petugas --":
-                         st.error("Pilih nama Anda di sidebar sebelum konfirmasi Inbound.")
-                    else:
-                        success, msg = update_inbound_status(item_details['id'], item_details['gr_number'], admin_name)
-                        if success:
-                            st.success(f"Status INBOUND berhasil diperbarui untuk {item_details['nama_barang']}!")
-                            st.cache_data.clear()
-                            st.rerun()
+                try:
+                    item_details = df_inbound_pending[
+                        (df_inbound_pending['gr_number'] == selected_inbound_item.split(' | ')[0].strip()) &
+                        (df_inbound_pending['sku'] == selected_inbound_item.split('SKU: ')[1].strip())
+                    ].iloc[0]
+                except IndexError:
+                    st.error("Gagal menemukan detail item. Muat ulang data.")
+                    item_details = None
+
+                if item_details is not None:
+                    if st.button(f"✅ KONFIRMASI INBOUND: {item_details['nama_barang']}", type="primary"):
+                        # Nama Admin (dari sidebar)
+                        admin_name = st.session_state[SESSION_KEY_CHECKER]
+                        if admin_name == "-- Pilih Petugas --":
+                             st.error("Pilih nama Anda di sidebar sebelum konfirmasi Inbound.")
                         else:
-                            st.error(f"Gagal: {msg}")
+                            success, msg = update_inbound_status(item_details['id'], item_details['gr_number'], admin_name)
+                            if success:
+                                st.success(f"Status INBOUND berhasil diperbarui untuk {item_details['nama_barang']}!")
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(f"Gagal: {msg}")
                             
             st.markdown("---")
             st.dataframe(df_inbound_pending[['gr_number', 'sku', 'nama_barang', 'qty_fisik', 'jenis', 'updated_by', 'updated_at']], use_container_width=True)
@@ -1033,9 +1051,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.23", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.24", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.23")
+    st.sidebar.title("GR Validation Apps v1.24")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
