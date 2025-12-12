@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 from supabase import create_client
@@ -10,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.7 - Final API Error Catch] ---
+# --- KONFIGURASI [v1.9 - Master Key Method] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -24,20 +23,20 @@ logging.basicConfig(level=logging.INFO)
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("⚠️ KONFIGURASI DATABASE BELUM ADA.")
     st.markdown("Harap masukkan `SUPABASE_URL` dan `SUPABASE_KEY` di **Secrets Streamlit Cloud** atau file `.streamlit/secrets.toml`.")
+    st.markdown("**(Pastikan `SUPABASE_KEY` adalah SERVICE ROLE KEY/MASTER KEY untuk bypass RLS)**")
     st.stop()
 
-# Menghapus hashing agar koneksi dibuat ulang setelah RLS diperbarui
-# Jika ini berhasil, kita akan mengembalikannya ke @st.cache_resource
-@st.cache_resource
+# FIX v1.8: Memaksa Streamlit me-rehash koneksi dengan Supabase
+@st.cache_resource(hash_funcs={type(st.secrets): lambda x: (x.get("SUPABASE_URL"), x.get("SUPABASE_KEY"))})
 def init_connection():
     try:
-        logging.info("Attempting to connect to Supabase...")
+        logging.info("Attempting to connect to Supabase using Master Key method...")
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
         client.table(RECEIVING_TABLE).select("id").limit(0).execute()
         return client
     except Exception as e:
         logging.error(f"Failed to connect to Supabase: {e}")
-        st.error("❌ KONEKSI DATABASE GAGAL. Pastikan URL dan Kunci Supabase Anda benar.")
+        st.error("❌ KONEKSI DATABASE GAGAL. Pastikan URL dan Kunci Supabase Anda (Service Role Key) benar.")
         st.stop()
 
 supabase = init_connection()
@@ -280,7 +279,8 @@ def handle_update_non_sn(row, new_qty, new_jenis, nama_user, loaded_time, ketera
             supabase.table(RECEIVING_TABLE).update(update_payload).eq("id", id_barang).execute()
             return 1, False # Success
         except APIError as api_e:
-            st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. Detail: {api_e}")
+            error_msg = f"API Error: {api_e.message}. Status Code: {api_e.code}" if hasattr(api_e, 'message') else str(api_e)
+            st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. DETAIL: {error_msg}")
             return 0, True 
         
     return 0, False # No change
@@ -331,8 +331,8 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
             return 1, False # Success
         except APIError as api_e:
             # FIX v1.7: Tampilkan pesan API error spesifik dari Supabase
-            error_msg = f"API Error: {api_e.message}" if hasattr(api_e, 'message') else str(api_e)
-            st.error(f"❌ Gagal Simpan Item SN {row['nama_barang']}. Detail: {error_msg}")
+            error_msg = f"API Error: {api_e.message}. Status Code: {api_e.code}" if hasattr(api_e, 'message') else str(api_e)
+            st.error(f"❌ Gagal Simpan Item SN {row['nama_barang']}. DETAIL RLS: {error_msg}")
             return 0, True 
         
     return 0, False # No change
