@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.18 - Blind Receive SN/NON-SN] ---
+# --- KONFIGURASI [v1.19 - Multi-GR Session Support] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -87,20 +87,31 @@ def convert_df_to_excel(df, sheet_name='Data_Receiving'):
 # --- FUNGSI HELPER DATABASE ---
 
 def get_active_session_info():
-    """Mengambil GR number sesi aktif saat ini"""
+    """Mengambil SEMUA GR number sesi aktif saat ini"""
     try:
-        res = supabase.table(RECEIVING_TABLE).select("gr_number").eq("is_active", True).limit(1).execute()
-        if res.data: return res.data[0]['gr_number']
-        return "Belum Ada Sesi Aktif"
+        # Mengambil semua GR number yang aktif
+        res = supabase.table(RECEIVING_TABLE).select("gr_number").eq("is_active", True).execute()
+        active_grs = sorted(list(set([x['gr_number'] for x in res.data])))
+        return active_grs if active_grs else ["Belum Ada Sesi Aktif"]
     except Exception as e:
         logging.warning(f"Failed to get active session info: {e}")
-        return "-"
+        return ["- Error Koneksi -"]
 
 def get_data(gr_number=None, search_term=None, only_active=True):
-    """Mengambil data GR untuk dicek"""
+    """Mengambil data GR untuk dicek, berdasarkan GR number yang dipilih"""
     query = supabase.table(RECEIVING_TABLE).select("*")
-    if only_active: query = query.eq("is_active", True)
-    elif gr_number: query = query.eq("gr_number", gr_number)
+    
+    if gr_number and gr_number != "BLIND-RECEIVE":
+        query = query.eq("gr_number", gr_number)
+    
+    if only_active: 
+        # Jika GR number spesifik, filter by GR number. Jika tidak ada GR number (global load), filter by is_active=True
+        if not gr_number:
+            query = query.eq("is_active", True)
+        # Jika gr_number adalah BLIND-RECEIVE, kita tidak perlu filter is_active
+        if gr_number != "BLIND-RECEIVE":
+             query = query.eq("is_active", True)
+
     
     start_time = datetime.now(timezone.utc)
     try:
@@ -183,7 +194,7 @@ def process_and_insert(df, gr_number):
             "nama_barang": str(row.get('Nama Barang')).strip(),
             "kategori_barang": tipe_barang,
             "qty_po": int(row.get('Qty PO', 0)),
-            "qty_fisik": 0, "updated_by": "-", "is_active": True, "gr_number": gr_number,
+            "qty_fisik": 0, "updated_by": "-", "is_active": True, "gr_number": gr_number, # is_active=True untuk sesi baru
             "jenis": jenis_val,
             "keterangan": keterangan_val, 
             "sn_list": [] if is_sn_item else None
@@ -194,8 +205,7 @@ def process_and_insert(df, gr_number):
         return False, "Tidak ada data valid untuk diinput."
         
     try:
-        # Nonaktifkan sesi lama
-        supabase.table(RECEIVING_TABLE).update({"is_active": False}).eq("is_active", True).execute()
+        # FIX V1.19: TIDAK LAGI menonaktifkan sesi lama secara otomatis
         
         # Masukkan data baru
         batch_size = 500
@@ -388,8 +398,10 @@ def handle_blind_insert(brand, sku, qty, sn_list, tipe_barang, jenis, keterangan
 
 # --- HALAMAN CHECKER ---
 def page_checker():
-    active_gr = get_active_session_info()
-    st.title(f"📱 Validasi GR: {active_gr}")
+    # FIX V1.19: Mengambil SEMUA sesi aktif
+    active_grs = get_active_session_info()
+    
+    st.title("📱 Validasi Kedatangan Barang")
     
     if SESSION_KEY_CHECKER not in st.session_state:
         st.session_state[SESSION_KEY_CHECKER] = "-- Pilih Petugas --"
@@ -400,38 +412,67 @@ def page_checker():
     except ValueError:
         default_index = 0 
 
+    # --- Pilihan Checker dan Sesi GR ---
     with st.container():
-        c_pemeriksa, c_placeholder = st.columns([1, 3])
+        c_pemeriksa, c_gr_session = st.columns([1, 2])
+        
+        # 1. Nama Checker
         with c_pemeriksa:
             nama_user = st.selectbox("👤 Nama Checker", opsi_checker, index=default_index, key="checker_select")
             if nama_user != st.session_state[SESSION_KEY_CHECKER]:
                  st.session_state[SESSION_KEY_CHECKER] = nama_user
                  st.rerun() 
-    
-    st.divider()
-    final_nama_user = st.session_state[SESSION_KEY_CHECKER]
+        
+        # 2. Sesi GR/PO Aktif
+        current_active_grs = [gr for gr in active_grs if gr != "BLIND-RECEIVE"]
+        gr_options = ["-- Pilih Sesi GR/PO --"] + current_active_grs
+        
+        if 'selected_gr_session' not in st.session_state:
+            st.session_state['selected_gr_session'] = gr_options[0]
 
+        with c_gr_session:
+            selected_gr = st.selectbox(
+                f"📅 Sesi GR/PO Aktif ({len(current_active_grs)} Dokumen)",
+                options=gr_options,
+                key='gr_session_selector',
+                index=0
+            )
+
+        st.divider()
+    
+    final_nama_user = st.session_state[SESSION_KEY_CHECKER]
+    
+    # -------------------------------------------------------------------------
+    # VALIDASI AWAL DAN MUAT DATA
+    # -------------------------------------------------------------------------
     if "Pilih Petugas" in final_nama_user:
         st.info("👋 Mohon **pilih nama Anda** terlebih dahulu untuk memulai validasi.")
         st.stop()
         
-    if active_gr == "Belum Ada Sesi Aktif":
-        st.warning("⚠️ Saat ini belum ada sesi GR/PO yang aktif. Silakan hubungi Admin.")
+    if selected_gr == "-- Pilih Sesi GR/PO --":
+        st.info("🔎 Mohon **pilih dokumen GR/PO** yang akan Anda validasi.")
+        
+        # Tampilkan status Blind Receive secara cepat jika ada
+        blind_df = get_data(gr_number="BLIND-RECEIVE", only_active=True)
+        if not blind_df.empty:
+             st.caption(f"ℹ️ Ada {len(blind_df)} item Blind Receive aktif yang menunggu review Admin.")
+             
         st.stop()
 
-    search_txt = st.text_input("🔍 Cari Barang (Ketik SKU/Nama)", placeholder="Contoh: S24 Ultra, Vivan Kabel...")
+    # Data hanya dimuat berdasarkan GR yang dipilih
+    search_txt = st.text_input(f"🔍 Cari Barang di {selected_gr}", placeholder="Ketik SKU/Nama...")
     
     if st.button("🔄 Muat Ulang Data", key="reload_btn"):
         st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
 
-    df = get_data(gr_number=active_gr, search_term=search_txt, only_active=True)
+    df = get_data(gr_number=selected_gr, search_term=search_txt, only_active=True)
     loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, tzinfo=timezone.utc))
     
     if df.empty:
-        st.info(f"Tidak ada data barang yang valid untuk GR **{active_gr}**.")
-    
+        st.info(f"Tidak ada data barang yang valid untuk GR **{selected_gr}**.")
+        
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
     
@@ -443,10 +484,10 @@ def page_checker():
     col_metric, col_bar = st.columns([1, 3])
     
     with col_metric:
-        st.metric("Total Unit Divalidasi", f"{total_qty_fisik_tercatat} / {total_qty_po} (Dari PO)")
+        st.metric(f"Unit Divalidasi di {selected_gr}", f"{total_qty_fisik_tercatat} / {total_qty_po} (Dari PO)")
     with col_bar:
         st.write("")
-        st.caption(f"Progress Total GR: {progress_percent * 100:.1f}%")
+        st.caption(f"Progress Dokumen: {progress_percent * 100:.1f}%")
         st.progress(progress_percent)
     st.markdown("---")
     
@@ -480,7 +521,7 @@ def page_checker():
                 selected_item_str = col_sku.selectbox(
                     "Pilih Barang SN yang Sedang Anda Scan", 
                     options=sn_select_options,
-                    key="global_sn_selector"
+                    key="global_sn_selector_tab1" # Updated Key
                 )
 
                 # Cari ID barang yang dipilih
@@ -498,6 +539,7 @@ def page_checker():
                     "Tujuan Alokasi SN", 
                     ['Stok', 'Display'], 
                     index=['Stok', 'Display'].index(current_jenis),
+                    key="radio_jenis_tab1" # Updated Key
                 )
                 
                 st.markdown("##### 📝 Scan SN di Bawah (Satu SN per Baris)")
@@ -710,12 +752,15 @@ def page_checker():
 # --- FUNGSI ADMIN ---
 def page_admin():
     st.title("🛡️ Admin Dashboard (Receiving)")
-    active_gr = get_active_session_info()
+    active_grs = get_active_session_info()
     
-    if active_gr == "Belum Ada Sesi Aktif":
-        st.warning("⚠️ Belum ada sesi GR aktif. Silakan mulai sesi baru di bawah.")
+    # Menghilangkan BLIND-RECEIVE dari daftar yang harus diadministrasi
+    admin_active_grs = [gr for gr in active_grs if gr != "BLIND-RECEIVE" and gr != "- Error Koneksi -"]
+    
+    if not admin_active_grs:
+        st.warning("⚠️ Belum ada sesi GR aktif yang di-upload.")
     else:
-        st.info(f"📅 Sesi Aktif: **{active_gr}**")
+        st.info(f"📅 Sesi Aktif: **{', '.join(admin_active_grs)}**")
     
     tab1, tab2, tab3, tab4 = st.tabs(["🚀 Mulai Sesi GR", "🗄️ Laporan & Arsip", "⚠️ Danger Zone", "🔧 Maintenance"])
     
@@ -727,15 +772,16 @@ def page_admin():
         st.write("---")
 
         st.markdown("### 2️⃣ Mulai Sesi Penerimaan Baru")
-        st.caption("Upload File Master GR/PO di sini. Sesi GR aktif sebelumnya akan diarsipkan.")
+        st.caption("Upload File Master GR/PO di sini. Sesi yang di-upload akan menjadi AKTIF.")
         
         gr_number = st.text_input("Nomor GR/PO Baru", placeholder="Contoh: GR/2025/11/001")
         file_master = st.file_uploader("Upload File Master GR/PO", type="xlsx", key="u_main_gr")
         
         if file_master and gr_number:
             if st.button("🔥 MULAI SESI RECEIVING BARU", type="primary"):
-                with st.spinner("Mereset & Upload Data GR..."):
+                with st.spinner("Meng-upload Data GR..."):
                     df = pd.read_excel(file_master)
+                    # FIX V1.19: Tidak lagi menonaktifkan sesi lama
                     ok, msg = process_and_insert(df, gr_number.strip())
                     if ok: st.success(f"Sesi '{gr_number.strip()}' Dimulai! {msg} data GR masuk."); time.sleep(2); st.cache_data.clear(); st.rerun()
                     else: st.error(f"Gagal: {msg}")
@@ -743,24 +789,33 @@ def page_admin():
 
     with tab2:
         st.markdown("### 📊 Laporan Penerimaan")
-        mode_view = st.radio("Pilih Data GR:", ["Sesi Aktif Sekarang", "Arsip / History Lama"], horizontal=True)
-        df = pd.DataFrame()
         
-        if mode_view == "Sesi Aktif Sekarang": 
-            df = get_data(only_active=True)
-            report_name = active_gr
-        else:
-            try:
-                res = supabase.table(RECEIVING_TABLE).select("gr_number").eq("is_active", False).execute()
-                gr_numbers = sorted(list(set([x['gr_number'] for x in res.data])), reverse=True)
-                selected_gr = st.selectbox("Pilih Nomor GR Lama:", gr_numbers) if gr_numbers else None
-                if selected_gr: 
-                    df = get_data(only_active=False, gr_number=selected_gr)
-                    report_name = selected_gr
-                else: report_name = "Arsip"
-            except: st.error("Gagal load history.")
+        # Mengambil semua GR, termasuk yang Blind Receive
+        all_gr_numbers = get_active_session_info()
+        all_archived_grs = sorted(list(set([x['gr_number'] for x in supabase.table(RECEIVING_TABLE).select("gr_number").eq("is_active", False).execute().data])) if supabase.table(RECEIVING_TABLE).select("gr_number").execute().data else [])
+        
+        gr_report_options = (
+            ["-- Pilih Dokumen --"] + 
+            [f"AKTIF: {gr}" for gr in admin_active_grs] +
+            [f"AKTIF: BLIND-RECEIVE"] +
+            [f"ARSIP: {gr}" for gr in all_archived_grs]
+        )
+        
+        selected_report_str = st.selectbox("Pilih Dokumen untuk Laporan:", gr_report_options)
+        
+        df = pd.DataFrame()
+        report_name = ""
+        is_active_session = False
+        
+        if selected_report_str.startswith("AKTIF:"):
+            report_name = selected_report_str.split("AKTIF: ")[1]
+            df = get_data(gr_number=report_name, only_active=True)
+            is_active_session = True
+        elif selected_report_str.startswith("ARSIP:"):
+            report_name = selected_report_str.split("ARSIP: ")[1]
+            df = get_data(gr_number=report_name, only_active=False)
 
-        if not df.empty:
+        if not df.empty and report_name:
             st.markdown("---")
             df['qty_diff'] = df['qty_fisik'] - df['qty_po']
             
@@ -782,11 +837,11 @@ def page_admin():
             st.download_button(f"📥 Download Laporan {report_name}", convert_df_to_excel(df), f"Laporan_GR_{report_name}_{tgl}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             
             # Tambahkan fungsi arsip sesi yang aktif
-            if mode_view == "Sesi Aktif Sekarang" and active_gr != "Belum Ada Sesi Aktif":
-                if st.button(f"✅ ARSIPKAN SESI {active_gr}", type="secondary"):
+            if is_active_session and report_name != "BLIND-RECEIVE":
+                if st.button(f"✅ ARSIPKAN SESI {report_name}", type="secondary"):
                      try:
-                        supabase.table(RECEIVING_TABLE).update({"is_active": False}).eq("gr_number", active_gr).execute()
-                        st.success(f"Sesi {active_gr} berhasil diarsipkan!")
+                        supabase.table(RECEIVING_TABLE).update({"is_active": False}).eq("gr_number", report_name).execute()
+                        st.success(f"Sesi {report_name} berhasil diarsipkan!")
                         time.sleep(2); st.rerun()
                      except Exception as e:
                          st.error(f"Gagal mengarsipkan: {e}")
@@ -796,18 +851,18 @@ def page_admin():
         st.header("⚠️ DANGER ZONE")
         st.error("Tindakan di sini bersifat permanen.")
         
-        st.markdown(f"**Menghapus Sesi Aktif ({active_gr}):** Ini akan menghapus **SELURUH** data sesi GR ini tanpa arsip. Gunakan dengan hati-hati.")
+        st.markdown(f"**Menghapus SEMUA Sesi Aktif:** Ini akan menghapus **SELURUH** data sesi GR yang sedang berjalan (is_active=True) tanpa arsip. Hati-hati.")
         
         st.divider()
         input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456", key="final_pin")
         st.session_state['confirm_reset_state'] = st.checkbox("Saya sadar data sesi ini akan hilang permanen.", key="final_check")
         
-        if st.button("🔥 HAPUS SESI GR INI", use_container_width=True):
+        if st.button("🔥 HAPUS SEMUA SESI AKTIF", use_container_width=True):
             if input_pin == RESET_PIN:
                 if st.session_state.get('confirm_reset_state', False): 
                     with st.spinner("Menghapus Sesi Aktif..."):
                         ok, msg = delete_active_session()
-                        if ok: st.success("Sesi GR berhasil di-reset!"); time.sleep(2); st.rerun()
+                        if ok: st.success("Semua Sesi Aktif berhasil di-reset!"); time.sleep(2); st.rerun()
                         else: st.error(f"Gagal: {msg}")
                 else:
                     st.error("Harap centang konfirmasi dulu.")
@@ -826,9 +881,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.18", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.18")
-    st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
+    st.set_page_config(page_title="GR Validation v1.19", page_icon="📦", layout="wide")
+    # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
+    st.sidebar.title("GR Validation Apps v1.19")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
