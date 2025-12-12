@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.15 - Confirmed Ideal Layout] ---
+# --- KONFIGURASI [v1.16 - Blind Receive] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -343,6 +343,38 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
         
     return 0, False # No change
 
+def handle_blind_insert(sku, nama_barang, qty, jenis, keterangan, nama_user):
+    """Menangani INSERT barang tanpa dokumen (Blind Receive)"""
+    try:
+        if not sku or not nama_barang or qty <= 0:
+            return False, "SKU, Nama Barang, dan Qty harus diisi."
+
+        # Payload untuk Blind Receive
+        payload = {
+            "sku": sku.strip(),
+            "nama_barang": nama_barang.strip(),
+            "kategori_barang": 'NON-SN', # Default NON-SN untuk simplicity
+            "qty_po": 0, # PO Qty selalu 0 untuk item Blind Receive
+            "qty_fisik": qty,
+            "jenis": jenis,
+            "keterangan": f"BLIND RECEIVE ({nama_user}): {keterangan}",
+            "updated_by": nama_user,
+            "is_active": True,
+            "gr_number": "BLIND-RECEIVE" # Flag khusus
+        }
+        
+        supabase.table(RECEIVING_TABLE).insert(payload).execute()
+        return True, "Barang tanpa dokumen berhasil diregistrasi!"
+
+    except APIError as api_e:
+        error_msg = f"API Error: {api_e.message}. Status Code: {api_e.code}" if hasattr(api_e, 'message') else str(api_e)
+        st.error(f"❌ Gagal Registrasi Blind Receive. DETAIL: {error_msg}")
+        st.cache_resource.clear()
+        st.rerun()
+        return False, "Terjadi kesalahan database (RLS/API)."
+    except Exception as e:
+        return False, f"Error umum: {str(e)}"
+
 # --- HALAMAN CHECKER ---
 def page_checker():
     active_gr = get_active_session_info()
@@ -388,8 +420,8 @@ def page_checker():
     
     if df.empty:
         st.info(f"Tidak ada data barang yang valid untuk GR **{active_gr}**.")
-        return
-
+        # Lanjut menampilkan form Blind Receive meskipun GR Master kosong
+    
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
     
@@ -409,15 +441,42 @@ def page_checker():
     st.markdown("---")
     
     # =========================================================================
-    # GLOBAL SN SCANNER FORM (NEW METHOD)
-    # Global Scanner diletakkan di atas agar mudah dijangkau saat scanning.
+    # BLIND RECEIVE / AD HOC FORM (New Section)
+    # =========================================================================
+    st.subheader("👻 Registrasi Barang Tanpa Dokumen (Blind Receive)")
+    with st.expander("Klik untuk Registrasi Barang Ad Hoc (Non-SN)", expanded=False):
+        with st.form("blind_receive_form", clear_on_submit=True):
+            st.caption("Gunakan ini HANYA untuk barang Non-SN yang tidak ada di Master GR/PO.")
+            
+            col_sku, col_nama, col_qty = st.columns([1.5, 2, 1])
+            blind_sku = col_sku.text_input("SKU Barang", placeholder="Wajib diisi")
+            blind_nama = col_nama.text_input("Nama Barang", placeholder="Wajib diisi")
+            blind_qty = col_qty.number_input("Jumlah Fisik Diterima", min_value=1, step=1)
+            
+            col_jenis_desc, col_keterangan = st.columns([1, 2])
+            blind_jenis = col_jenis_desc.radio("Tujuan Alokasi", ['Stok', 'Display'], index=0)
+            blind_keterangan = col_keterangan.text_area("Keterangan Tambahan (Wajib)", height=50)
+
+            if st.form_submit_button("➕ REGISTRASI BLIND RECEIVE (INSERT BARU)", type="secondary", use_container_width=True):
+                if not blind_sku or not blind_nama or blind_qty <= 0 or not blind_keterangan.strip():
+                    st.error("Semua field (SKU, Nama, Qty, Keterangan) wajib diisi untuk Blind Receive.")
+                else:
+                    success, msg = handle_blind_insert(
+                        blind_sku, blind_nama, blind_qty, blind_jenis, blind_keterangan, final_nama_user
+                    )
+                    if success:
+                        st.success(f"✅ Registrasi Blind Receive berhasil! Item: {blind_nama}")
+                        time.sleep(1)
+                        st.rerun()
+
+    st.divider()
+
+    # =========================================================================
+    # GLOBAL SN SCANNER FORM 
     # =========================================================================
     if not df_sn.empty:
         
         st.subheader("⚡ Pemindaian Global SN (Scan Cepat)")
-        
-        # Opsi barang SN yang belum selesai divalidasi
-        sn_options_df = df_sn[df_sn['qty_fisik'] < df_sn['qty_po']]
         
         # Pilihan untuk Selectbox: SKU - Nama Barang (ID)
         sn_select_options = ["-- Pilih Barang SN yang Discan --"] + [
@@ -439,7 +498,6 @@ def page_checker():
             selected_id = None
             selected_row = None
             if "ID:" in selected_item_str:
-                # Perubahan untuk mengatasi format ID yang baru
                 item_id_part = selected_item_str.split('(ID: ')[1].strip(')')
                 selected_id_prefix = item_id_part.split('...')[0]
                 selected_row_match = df_sn[df_sn['id'].str.startswith(selected_id_prefix)]
@@ -503,8 +561,7 @@ def page_checker():
         st.divider()
 
     # =========================================================================
-    # [1] LIST BARANG NON-SN (TIDAK BERUBAH)
-    # Card sembunyi by default
+    # [1] LIST BARANG NON-SN 
     # =========================================================================
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)})")
@@ -560,7 +617,6 @@ def page_checker():
     # =========================================================================
     # [2] STATUS BARANG SN (DISPLAY ONLY)
     # Ditempatkan di bawah Non-SN untuk review akhir.
-    # Card sembunyi by default
     # =========================================================================
     if not df_sn.empty:
         st.subheader(f"📋 Status Barang SN ({len(df_sn)})")
