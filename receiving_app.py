@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.22 - QoL & Responsive Design] ---
+# --- KONFIGURASI [v1.23 - Inbound Status Control] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -55,7 +55,8 @@ def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        cols = ['gr_number', 'sku', 'nama_barang', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'jenis', 'sn_list', 'updated_by', 'updated_at']
+        # FIX V1.23: Tambah kolom is_inbound
+        cols = ['gr_number', 'sku', 'nama_barang', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'jenis', 'is_inbound', 'sn_list', 'updated_by', 'updated_at']
         
         df_export = df.copy()
         if 'sn_list' in df_export.columns:
@@ -101,14 +102,17 @@ def get_data(gr_number=None, search_term=None, only_active=True):
     """Mengambil data GR untuk dicek, berdasarkan GR number yang dipilih"""
     query = supabase.table(RECEIVING_TABLE).select("*")
     
-    # FIX V1.21: Filter GR Number selalu diterapkan jika ada
     if gr_number:
         query = query.eq("gr_number", gr_number)
     
-    # Filter Status Aktif selalu diterapkan jika diminta
     if only_active: 
         query = query.eq("is_active", True)
 
+    # FIX V1.23: Handle missing is_inbound column if SQL hasn't been run
+    select_fields = "*"
+    if 'is_inbound' not in supabase.table(RECEIVING_TABLE).select("is_inbound").limit(0).execute().data:
+        select_fields = "*, false as is_inbound"
+    query = supabase.table(RECEIVING_TABLE).select(select_fields)
     
     start_time = datetime.now(timezone.utc)
     try:
@@ -119,6 +123,8 @@ def get_data(gr_number=None, search_term=None, only_active=True):
         
     df = pd.DataFrame(response.data)
 
+    # Pastikan is_inbound ada di DF (default false jika tidak ada di DB)
+    if 'is_inbound' not in df.columns: df['is_inbound'] = False
     if 'keterangan' not in df.columns: df['keterangan'] = ""
     if 'jenis' not in df.columns: df['jenis'] = "Stok"
 
@@ -157,12 +163,9 @@ def process_and_insert(df, gr_number):
         return False, f"File Excel harus memiliki kolom: {', '.join(required_cols)}"
         
     # === [FIX v1.4: Robust NaN Handling] ===
-    # Mengisi NaN pada Qty PO dengan 0, lalu paksa ke integer
     if 'Qty PO' in df.columns:
         df['Qty PO'] = df['Qty PO'].fillna(0).astype(int)
     
-    # Mengisi NaN pada kolom teks dengan string kosong ('')
-    # Ini memastikan semua kolom yang tidak wajib diisi numerik aman dari float/nan
     df['Tujuan (Stok/Display)'] = df['Tujuan (Stok/Display)'].fillna('')
     df['Keterangan Awal'] = df['Keterangan Awal'].fillna('')
     df['SKU'] = df['SKU'].fillna('')
@@ -173,16 +176,10 @@ def process_and_insert(df, gr_number):
     
     for _, row in df.iterrows():
         
-        # 1. Tujuan (Stok/Display) - Ambil string, jika kosong set default
         jenis_val = str(row.get('Tujuan (Stok/Display)')).strip()
-        if jenis_val == '':
-            jenis_val = 'Stok'
-
-        # 2. Keterangan Awal - Akan menjadi None jika string kosong
+        if jenis_val == '': jenis_val = 'Stok'
         keterangan_val = str(row.get('Keterangan Awal')).strip()
         keterangan_val = keterangan_val if keterangan_val else None
-        
-        # 3. Kategori Barang (Tipe Barang)
         tipe_barang = str(row.get('Tipe Barang')).upper()
         is_sn_item = tipe_barang == 'SN'
 
@@ -191,10 +188,11 @@ def process_and_insert(df, gr_number):
             "nama_barang": str(row.get('Nama Barang')).strip(),
             "kategori_barang": tipe_barang,
             "qty_po": int(row.get('Qty PO', 0)),
-            "qty_fisik": 0, "updated_by": "-", "is_active": True, "gr_number": gr_number, # is_active=True untuk sesi baru
+            "qty_fisik": 0, "updated_by": "-", "is_active": True, "gr_number": gr_number,
             "jenis": jenis_val,
             "keterangan": keterangan_val, 
-            "sn_list": [] if is_sn_item else None
+            "sn_list": [] if is_sn_item else None,
+            "is_inbound": False # FIX V1.23: Semua item baru status Inbound = FALSE
         }
         data_to_insert.append(item)
     
@@ -202,9 +200,6 @@ def process_and_insert(df, gr_number):
         return False, "Tidak ada data valid untuk diinput."
         
     try:
-        # FIX V1.19: TIDAK LAGI menonaktifkan sesi lama secara otomatis
-        
-        # Masukkan data baru
         batch_size = 500
         for i in range(0, len(data_to_insert), batch_size):
             supabase.table(RECEIVING_TABLE).insert(data_to_insert[i:i+batch_size]).execute()
@@ -213,7 +208,6 @@ def process_and_insert(df, gr_number):
     except APIError as e:
          return False, f"Gagal API Supabase: {e.message}. Pastikan kolom DB sudah dibuat dengan benar."
     except Exception as e:
-         # Menangkap error jika masih ada nan tersembunyi
          return False, f"Error saat insert data: {str(e)}"
 
 def delete_active_session():
@@ -290,6 +284,7 @@ def handle_update_non_sn(row, new_qty, new_jenis, nama_user, loaded_time, ketera
             "updated_at": datetime.utcnow().isoformat(), 
             "updated_by": nama_user,
             "keterangan": keterangan_to_save
+            # is_inbound tidak diupdate oleh Checker
         }
 
         try:
@@ -340,6 +335,7 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
             "updated_at": datetime.utcnow().isoformat(), 
             "updated_by": nama_user,
             "keterangan": keterangan_to_save
+            # is_inbound tidak diupdate oleh Checker
         }
 
         try:
@@ -388,7 +384,8 @@ def handle_blind_insert(brand, sku, qty, sn_list, tipe_barang, jenis, keterangan
             "updated_by": nama_user,
             "is_active": True,
             "gr_number": "BLIND-RECEIVE",
-            "sn_list": json.dumps(final_sn_list) if final_sn_list is not None else None
+            "sn_list": json.dumps(final_sn_list) if final_sn_list is not None else None,
+            "is_inbound": False # FIX V1.23: Item Blind Receive juga perlu ditandai Inbound
         }
         
         supabase.table(RECEIVING_TABLE).insert(payload).execute()
@@ -402,6 +399,24 @@ def handle_blind_insert(brand, sku, qty, sn_list, tipe_barang, jenis, keterangan
         return False, "Terjadi kesalahan database (RLS/API)."
     except Exception as e:
         return False, f"Error umum: {str(e)}"
+
+# --- FUNGSI HALAMAN ADMIN ---
+
+def update_inbound_status(item_id, current_gr, nama_user):
+    """FIX V1.23: Update status is_inbound menjadi True"""
+    try:
+        update_payload = {
+            "is_inbound": True,
+            "updated_by": f"INBOUND-{nama_user}",
+            "updated_at": datetime.utcnow().isoformat(),
+            "keterangan": f"INBOUND OK oleh {nama_user}."
+        }
+        
+        supabase.table(RECEIVING_TABLE).update(update_payload).eq("id", item_id).execute()
+        return True, f"Item {item_id} berhasil ditandai INBOUND."
+    except Exception as e:
+        return False, f"Gagal update status inbound: {str(e)}"
+
 
 # --- HALAMAN CHECKER ---
 def page_checker():
@@ -767,7 +782,11 @@ def page_checker():
                 status_text = "MATCH" if selisih_po == 0 else ("OVER" if selisih_po > 0 else "SHORT")
                 status_color = "green" if selisih_po == 0 else "red"
                 
-                header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}] | Alokasi: {default_jenis}"
+                # FIX V1.23: Tampilkan status Inbound di header status
+                inbound_status = "✅ INBOUND OK" if row.get('is_inbound') else "⏳ BELUM INBOUND"
+                inbound_color = "blue" if row.get('is_inbound') else "orange"
+                
+                header_text = f"**{row['nama_barang']}** | Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}] | Alokasi: {default_jenis} | Status: :{inbound_color}[{inbound_status}]"
                 
                 # Card Status SN (sembunyi default)
                 with st.expander(header_text, expanded=False):
@@ -789,8 +808,13 @@ def page_checker():
             st.subheader(f"📦 Status Barang Non-SN ({len(df_non)})")
             
             # Menampilkan Non-SN dalam bentuk tabel sederhana untuk review
-            df_review = df_non[['sku', 'nama_barang', 'qty_po', 'qty_fisik', 'jenis', 'updated_by', 'keterangan']].copy()
+            df_review = df_non[['sku', 'nama_barang', 'qty_po', 'qty_fisik', 'jenis', 'updated_by', 'keterangan', 'is_inbound']].copy()
             df_review['Selisih'] = df_review['qty_fisik'] - df_review['qty_po']
+            
+            # FIX V1.23: Format Inbound Status
+            df_review['Status Inbound'] = df_review['is_inbound'].apply(lambda x: "OK" if x else "PENDING")
+            df_review = df_review.drop(columns=['is_inbound'])
+            
             st.dataframe(df_review, use_container_width=True)
         else:
             st.info("Tidak ada item Non-SN dalam sesi ini.")
@@ -808,7 +832,13 @@ def page_admin():
     else:
         st.info(f"📅 Sesi Aktif: **{', '.join(admin_active_grs)}**")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Mulai Sesi GR", "🗄️ Laporan & Arsip", "⚠️ Danger Zone", "🔧 Maintenance"])
+    tab1, tab2, tab3, tab_inbound, tab_maintenance = st.tabs([
+        "🚀 Mulai Sesi GR", 
+        "🗄️ Laporan & Arsip", 
+        "⚠️ Danger Zone", 
+        "📦 Inbound Control",
+        "🔧 Maintenance"
+    ])
     
     with tab1:
         st.markdown("### 1️⃣ Download Template Master GR/PO")
@@ -876,7 +906,7 @@ def page_admin():
             c3.metric("Total Qty Fisik", total_fisik)
             c4.metric("Total Selisih", total_diff)
             
-            st.dataframe(df[['gr_number', 'sku', 'nama_barang', 'kategori_barang', 'jenis', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'updated_by', 'updated_at']])
+            st.dataframe(df[['gr_number', 'sku', 'nama_barang', 'kategori_barang', 'jenis', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'is_inbound', 'updated_by', 'updated_at']])
             
             # --- FIX V1.22: Hapus Item Blind Receive ---
             if report_name == "BLIND-RECEIVE" and is_active_session:
@@ -939,7 +969,59 @@ def page_admin():
             else:
                 st.error("PIN Salah.")
                 
-    with tab4:
+    with tab_inbound:
+        st.header("📦 Kontrol Status Inbound")
+        st.caption("Supervisor menandai item yang SUDAH divalidasi dan SUDAH dipindahkan ke area akhir (Display/Stok).")
+        
+        # Ambil semua data AKTIF yang sudah divalidasi tetapi BELUM Inbound
+        df_inbound_pending = get_data(only_active=True)
+        # Filter: qty_fisik > 0 DAN is_inbound == False
+        df_inbound_pending = df_inbound_pending[
+            (df_inbound_pending['qty_fisik'] > 0) & 
+            (df_inbound_pending['is_inbound'] == False)
+        ].copy()
+        
+        if df_inbound_pending.empty:
+            st.success("🎉 Tidak ada item yang menunggu status INBOUND.")
+        else:
+            st.info(f"Ditemukan {len(df_inbound_pending)} item menunggu konfirmasi Inbound.")
+            
+            # Persiapan Data untuk Diproses
+            inbound_options = ["-- Pilih Item untuk Inbound --"] + [
+                f"{row['gr_number']} | {row['nama_barang']} ({row['qty_fisik']} unit) | SKU: {row['sku']}"
+                for _, row in df_inbound_pending.iterrows()
+            ]
+            
+            selected_inbound_item = st.selectbox(
+                "Pilih Item Selesai Inbound:", 
+                options=inbound_options
+            )
+            
+            if selected_inbound_item != "-- Pilih Item --":
+                # Mendapatkan ID dari baris yang dipilih
+                item_details = df_inbound_pending[
+                    (df_inbound_pending['gr_number'] == selected_inbound_item.split(' | ')[0].strip()) &
+                    (df_inbound_pending['sku'] == selected_inbound_item.split('SKU: ')[1].strip())
+                ].iloc[0]
+                
+                if st.button(f"✅ KONFIRMASI INBOUND: {item_details['nama_barang']}", type="primary"):
+                    # Nama Admin (dari sidebar)
+                    admin_name = st.session_state[SESSION_KEY_CHECKER]
+                    if admin_name == "-- Pilih Petugas --":
+                         st.error("Pilih nama Anda di sidebar sebelum konfirmasi Inbound.")
+                    else:
+                        success, msg = update_inbound_status(item_details['id'], item_details['gr_number'], admin_name)
+                        if success:
+                            st.success(f"Status INBOUND berhasil diperbarui untuk {item_details['nama_barang']}!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Gagal: {msg}")
+                            
+            st.markdown("---")
+            st.dataframe(df_inbound_pending[['gr_number', 'sku', 'nama_barang', 'qty_fisik', 'jenis', 'updated_by', 'updated_at']], use_container_width=True)
+
+    with tab_maintenance:
         st.header("🔧 Debugging & Cache Maintenance")
         st.caption("Gunakan ini hanya jika Anda mendapat error aneh setelah mengganti Kunci API atau RLS.")
         if st.button("🗑️ HAPUS SEMUA CACHE STREAMLIT", type="secondary"):
@@ -951,9 +1033,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.22", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.23", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.22")
+    st.sidebar.title("GR Validation Apps v1.23")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
