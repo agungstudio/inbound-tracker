@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.1 - Stable with Logging] ---
+# --- KONFIGURASI [v1.3 - Final NaN Fix] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -142,25 +142,47 @@ def get_db_updated_at(id_barang):
 
 def process_and_insert(df, gr_number):
     """Memproses DF Master GR dan menginput ke DB"""
-    data_to_insert = []
     
     required_cols = ['SKU', 'Nama Barang', 'Qty PO', 'Tipe Barang']
     if not all(col in df.columns for col in required_cols):
         return False, f"File Excel harus memiliki kolom: {', '.join(required_cols)}"
+        
+    # === [FIX v1.3: PRE-PROCESSING NaN] ===
+    # Mengganti semua NaN di seluruh DataFrame dengan None (untuk text/optional fields)
+    df = df.where(pd.notna, None)
+    
+    # Memastikan Qty PO (Integer wajib) diisi 0 jika kosong
+    if 'Qty PO' in df.columns:
+        # Mengganti None/NaN dengan 0 lalu memastikan tipe data integer
+        df['Qty PO'] = df['Qty PO'].fillna(0).astype(int)
 
+    data_to_insert = []
+    
     for _, row in df.iterrows():
-        jenis_default = row.get('Tujuan (Stok/Display)', 'Stok')
-        keterangan_default = row.get('Keterangan Awal', None)
+        
+        # 1. Tujuan (Stok/Display) - Jika None, set default
+        jenis_val = row.get('Tujuan (Stok/Display)')
+        if jenis_val is None or str(jenis_val).strip() == '':
+            jenis_val = 'Stok'
+
+        # 2. Keterangan Awal - Akan menjadi None jika kosong (sudah dibersihkan di atas)
+        keterangan_val = row.get('Keterangan Awal')
+        
+        # 3. Kategori Barang (Tipe Barang)
+        tipe_barang = row.get('Tipe Barang')
+        if tipe_barang is None: tipe_barang = 'NON-SN'
+
+        is_sn_item = str(tipe_barang).upper() == 'SN'
 
         item = {
-            "sku": str(row.get('SKU', '')).strip(),
-            "nama_barang": row.get('Nama Barang', 'Unknown Item'),
-            "kategori_barang": str(row.get('Tipe Barang', 'NON-SN')).upper(),
+            "sku": str(row.get('SKU', '')).strip() if row.get('SKU') is not None else '',
+            "nama_barang": str(row.get('Nama Barang', 'Unknown Item')).strip() if row.get('Nama Barang') is not None else 'Unknown Item',
+            "kategori_barang": str(tipe_barang).upper(),
             "qty_po": int(row.get('Qty PO', 0)),
             "qty_fisik": 0, "updated_by": "-", "is_active": True, "gr_number": gr_number,
-            "jenis": jenis_default,
-            "keterangan": keterangan_default,
-            "sn_list": [] if str(row.get('Tipe Barang', 'NON-SN')).upper() == 'SN' else None
+            "jenis": str(jenis_val).strip(),
+            "keterangan": keterangan_val, # Dibiarkan None jika tidak ada
+            "sn_list": [] if is_sn_item else None
         }
         data_to_insert.append(item)
     
@@ -630,8 +652,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.1", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.1")
+    st.set_page_config(page_title="GR Validation v1.3", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.3")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
