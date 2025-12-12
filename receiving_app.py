@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.11 - Streamlit State Fix] ---
+# --- KONFIGURASI [v1.12 - Auto-Healing Connection] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -447,6 +447,11 @@ def page_checker():
                             st.rerun()
                         elif not conflict:
                             st.info("Tidak ada perubahan yang tersimpan.")
+                        elif conflict:
+                             # FIX v1.12: Auto-Heal untuk mengatasi cache RLS
+                             st.error("Gagal simpan Non-SN. Mencoba perbaikan otomatis (cache clear)...")
+                             st.cache_resource.clear()
+                             st.rerun()
                             
     st.markdown("---")
 
@@ -503,12 +508,13 @@ def page_checker():
                         if not conflict and updates > 0:
                             st.toast(f"✅ SN {new_sn_input} ditambahkan! Total {len(current_sn_list)}")
                             time.sleep(0.5) 
-                            # FIX v1.11: Menghapus baris st.session_state[sn_input_key] = "" yang menyebabkan API Exception
                             st.rerun()
                         elif conflict:
-                             st.warning("Gagal menambahkan SN karena ada konflik data atau kesalahan database.")
+                             # FIX v1.12: Auto-Heal untuk mengatasi cache RLS
+                             st.error("Gagal simpan SN. Mencoba perbaikan otomatis (cache clear)...")
+                             st.cache_resource.clear()
+                             st.rerun()
                         else:
-                             # Jika updates=0 dan tidak ada conflict, ini tidak boleh terjadi di blok ini
                              st.error("❌ Gagal menyimpan SN. Coba muat ulang data atau periksa konsol browser untuk error RLS/API.")
                         
                 # --- TAMPILAN SN LIST DAN REMOVE ---
@@ -532,7 +538,10 @@ def page_checker():
                                 st.toast(f"❌ SN {sn} dihapus.")
                                 st.rerun()
                             elif conflict:
-                                st.warning("Gagal menghapus SN karena ada konflik data.")
+                                # FIX v1.12: Auto-Heal untuk mengatasi cache RLS
+                                st.error("Gagal menghapus SN. Mencoba perbaikan otomatis (cache clear)...")
+                                st.cache_resource.clear()
+                                st.rerun()
 
                 else:
                     st.info("Belum ada Serial Number yang dimasukkan.")
@@ -675,8 +684,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.11", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.11")
+    st.set_page_config(page_title="GR Validation v1.12", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.12")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
