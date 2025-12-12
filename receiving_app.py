@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.10 - Force Cache Clear] ---
+# --- KONFIGURASI [v1.11 - Streamlit State Fix] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -503,7 +503,7 @@ def page_checker():
                         if not conflict and updates > 0:
                             st.toast(f"✅ SN {new_sn_input} ditambahkan! Total {len(current_sn_list)}")
                             time.sleep(0.5) 
-                            st.session_state[sn_input_key] = "" # Clear input
+                            # FIX v1.11: Menghapus baris st.session_state[sn_input_key] = "" yang menyebabkan API Exception
                             st.rerun()
                         elif conflict:
                              st.warning("Gagal menambahkan SN karena ada konflik data atau kesalahan database.")
@@ -675,8 +675,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.10", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.10")
+    st.set_page_config(page_title="GR Validation v1.11", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.11")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
