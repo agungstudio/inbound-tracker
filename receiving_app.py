@@ -7,15 +7,17 @@ import io
 import json
 import logging
 from postgrest.exceptions import APIError
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Font, Alignment
+import uuid
 
-# --- KONFIGURASI [v1.26 - 1 SN Per Baris di Laporan] ---
+# --- KONFIGURASI [v1.27 - Multi-Store & DB Operator Management] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
-DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
+# DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"] # Dihapus, sekarang dari DB
 RESET_PIN = "123456" 
 SESSION_KEY_CHECKER = "current_checker_name_receiving" 
-RECEIVING_TABLE = "receiving_validation" # Nama Tabel di Supabase
+RECEIVING_TABLE = "receiving_validation" # Nama Tabel GR/PO
+OPERATORS_TABLE = "store_operators" # Nama Tabel Operator Baru
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +34,7 @@ def init_connection():
     try:
         logging.info("Attempting to connect to Supabase using Master Key method...")
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Test connection by running a simple query
         client.table(RECEIVING_TABLE).select("id").limit(0).execute()
         return client
     except Exception as e:
@@ -40,6 +43,33 @@ def init_connection():
         st.stop()
 
 supabase = init_connection()
+
+# --- FUNGSI BARU: MANAJEMEN OPERATOR DARI DB ---
+
+@st.cache_data(ttl=60) # Cache 60 detik
+def get_stores():
+    """Mengambil daftar Cabang/Store yang unik dari DB"""
+    try:
+        res = supabase.table(OPERATORS_TABLE).select("store_name").execute()
+        stores = sorted(list(set([x['store_name'] for x in res.data if x['store_name']])))
+        return stores
+    except Exception as e:
+        logging.error(f"Error fetching stores: {e}")
+        return []
+
+@st.cache_data(ttl=60)
+def get_operators_by_store(store_name=None):
+    """Mengambil daftar Operator berdasarkan Cabang yang aktif"""
+    query = supabase.table(OPERATORS_TABLE).select("operator_name", "id", "store_name", "is_active").eq("is_active", True)
+    if store_name:
+        query = query.eq("store_name", store_name)
+    
+    try:
+        res = query.order("operator_name").execute()
+        return pd.DataFrame(res.data)
+    except Exception as e:
+        logging.error(f"Error fetching operators: {e}")
+        return pd.DataFrame()
 
 # --- FUNGSI HELPER WAKTU & KONVERSI ---
 def parse_supabase_timestamp(timestamp_str):
@@ -505,6 +535,33 @@ def update_inbound_status(item_id, current_gr, nama_user):
     except Exception as e:
         return False, f"Gagal update status inbound: {str(e)}"
 
+def add_operator(store_name, operator_name, is_active=True):
+    """Menambahkan operator baru ke tabel store_operators"""
+    if not store_name or not operator_name:
+        return False, "Nama Cabang dan Operator wajib diisi."
+    try:
+        payload = {
+            "store_name": store_name.strip(),
+            "operator_name": operator_name.strip(),
+            "is_active": is_active,
+        }
+        supabase.table(OPERATORS_TABLE).insert(payload).execute()
+        get_stores.clear() # Clear cache
+        get_operators_by_store.clear() # Clear cache
+        return True, f"Operator {operator_name} berhasil ditambahkan di {store_name}."
+    except Exception as e:
+        return False, f"Gagal menambahkan operator: {str(e)}"
+
+def delete_operator(operator_id):
+    """Menghapus operator dari tabel store_operators"""
+    try:
+        supabase.table(OPERATORS_TABLE).delete().eq("id", operator_id).execute()
+        get_stores.clear() # Clear cache
+        get_operators_by_store.clear() # Clear cache
+        return True, "Operator berhasil dihapus."
+    except Exception as e:
+        return False, f"Gagal menghapus operator: {str(e)}"
+
 
 # --- HALAMAN CHECKER ---
 def page_checker():
@@ -532,60 +589,86 @@ def page_checker():
     
     st.title("📱 Validasi Kedatangan Barang")
     
-    if SESSION_KEY_CHECKER not in st.session_state:
-        st.session_state[SESSION_KEY_CHECKER] = "-- Pilih Petugas --"
+    # --- Pilihan Cabang dan Checker ---
+    stores = get_stores()
     
-    opsi_checker = ["-- Pilih Petugas --"] + DAFTAR_CHECKER
+    # Inisialisasi state untuk Cabang jika belum ada
+    if 'selected_store' not in st.session_state:
+        st.session_state['selected_store'] = stores[0] if stores else "-- Pilih Cabang --"
+    
+    # 1. Pilih Cabang
+    store_options = ["-- Pilih Cabang --"] + stores
+    selected_store = st.selectbox(
+        "🏢 Pilih Cabang/Store Anda", 
+        options=store_options, 
+        key='store_selector'
+    )
+    
+    # Update state jika pilihan berubah
+    if selected_store != st.session_state['selected_store']:
+        st.session_state['selected_store'] = selected_store
+        # Clear checker selection when store changes
+        st.session_state[SESSION_KEY_CHECKER] = "-- Pilih Petugas --"
+        st.rerun()
+
+    # 2. Pilih Checker (Difilter berdasarkan Cabang)
+    df_operators = pd.DataFrame()
+    operator_names = ["-- Pilih Petugas --"]
+    
+    if selected_store != "-- Pilih Cabang --":
+        df_operators = get_operators_by_store(selected_store)
+        operator_names = ["-- Pilih Petugas --"] + list(df_operators['operator_name'].unique())
+        
+    if SESSION_KEY_CHECKER not in st.session_state or st.session_state[SESSION_KEY_CHECKER] not in operator_names:
+        st.session_state[SESSION_KEY_CHECKER] = operator_names[0]
+        
     try:
-        default_index = opsi_checker.index(st.session_state[SESSION_KEY_CHECKER])
+        default_index = operator_names.index(st.session_state[SESSION_KEY_CHECKER])
     except ValueError:
-        default_index = 0 
+        default_index = 0
+    
+    c_pemeriksa, c_gr_session = st.columns([1, 2])
 
-    # --- Pilihan Checker dan Sesi GR ---
-    with st.container():
-        c_pemeriksa, c_gr_session = st.columns([1, 2])
-        
-        # 1. Nama Checker
-        with c_pemeriksa:
-            nama_user = st.selectbox("👤 Nama Checker", opsi_checker, index=default_index, key="checker_select")
-            if nama_user != st.session_state[SESSION_KEY_CHECKER]:
-                 st.session_state[SESSION_KEY_CHECKER] = nama_user
-                 st.rerun() 
-        
-        # 2. Sesi GR/PO Aktif
-        current_active_grs = [gr for gr in active_grs if gr != "BLIND-RECEIVE"]
-        gr_options = ["-- Pilih Sesi GR/PO --"] + current_active_grs
-        
-        if 'selected_gr_session' not in st.session_state:
-            st.session_state['selected_gr_session'] = gr_options[0]
+    with c_pemeriksa:
+        nama_user = st.selectbox("👤 Nama Checker", operator_names, index=default_index, key="checker_select")
+        if nama_user != st.session_state[SESSION_KEY_CHECKER]:
+             st.session_state[SESSION_KEY_CHECKER] = nama_user
+             st.rerun() 
+    
+    # --- Pilihan Sesi GR ---
+    current_active_grs = [gr for gr in active_grs if gr != "BLIND-RECEIVE"]
+    gr_options = ["-- Pilih Sesi GR/PO --"] + current_active_grs
+    
+    if 'selected_gr_session' not in st.session_state:
+        st.session_state['selected_gr_session'] = gr_options[0]
 
-        with c_gr_session:
-            selected_gr = st.selectbox(
-                f"📅 Sesi GR/PO Aktif ({len(current_active_grs)} Dokumen)",
-                options=gr_options,
-                key='gr_session_selector',
-                index=0
-            )
+    with c_gr_session:
+        selected_gr = st.selectbox(
+            f"📅 Sesi GR/PO Aktif ({len(current_active_grs)} Dokumen)",
+            options=gr_options,
+            key='gr_session_selector',
+            index=0
+        )
 
-        st.divider()
+    st.divider()
     
     final_nama_user = st.session_state[SESSION_KEY_CHECKER]
     
     # -------------------------------------------------------------------------
     # VALIDASI AWAL DAN MUAT DATA
     # -------------------------------------------------------------------------
-    if "Pilih Petugas" in final_nama_user:
-        st.info("👋 Mohon **pilih nama Anda** terlebih dahulu untuk memulai validasi.")
-        st.stop()
-        
-    if selected_gr == "-- Pilih Sesi GR/PO --":
-        st.info("🔎 Mohon **pilih dokumen GR/PO** yang akan Anda validasi.")
+    if selected_store == "-- Pilih Cabang --" or "Pilih Petugas" in final_nama_user:
+        st.info("👋 Mohon **pilih Cabang dan nama Anda** terlebih dahulu untuk memulai validasi.")
         
         # Tampilkan status Blind Receive secara cepat jika ada
         blind_df = get_data(gr_number="BLIND-RECEIVE", only_active=True)
         if not blind_df.empty:
              st.caption(f"ℹ️ Ada {len(blind_df)} item Blind Receive aktif yang menunggu review Admin.")
              
+        st.stop()
+
+    if selected_gr == "-- Pilih Sesi GR/PO --":
+        st.info("🔎 Mohon **pilih dokumen GR/PO** yang akan Anda validasi.")
         st.stop()
 
     # Data hanya dimuat berdasarkan GR yang dipilih
@@ -920,11 +1003,12 @@ def page_admin():
     else:
         st.info(f"📅 Sesi Aktif: **{', '.join(admin_active_grs)}**")
     
-    tab1, tab2, tab3, tab_inbound, tab_maintenance = st.tabs([
+    tab1, tab2, tab3, tab_inbound, tab_operator, tab_maintenance = st.tabs([
         "🚀 Mulai Sesi GR", 
         "🗄️ Laporan & Arsip", 
         "⚠️ Danger Zone", 
         "📦 Inbound Control",
+        "👥 Manajemen Operator", # New Tab
         "🔧 Maintenance"
     ])
     
@@ -1119,6 +1203,77 @@ def page_admin():
             st.markdown("---")
             st.dataframe(df_inbound_pending[['gr_number', 'sku', 'nama_barang', 'qty_fisik', 'jenis', 'updated_by', 'updated_at']], use_container_width=True)
 
+    with tab_operator: # New Tab: Manajemen Operator
+        st.header("👥 Manajemen Operator & Cabang")
+        st.caption("Admin mengelola daftar Cabang dan Operator yang dapat login.")
+        
+        # --- Form Tambah Operator ---
+        st.subheader("1. Tambah Operator Baru")
+        with st.form("add_operator_form", clear_on_submit=True):
+            col_store, col_op = st.columns(2)
+            
+            # Menggunakan text input agar Admin bisa menambahkan nama cabang baru
+            new_store_name = col_store.text_input("Nama Cabang Baru (Contoh: JAKARTA A)", placeholder="Wajib Diisi")
+            new_operator_name = col_op.text_input("Nama Checker/Operator", placeholder="Wajib Diisi")
+            
+            if st.form_submit_button("➕ Tambah Checker/Cabang"):
+                if new_store_name and new_operator_name:
+                    success, msg = add_operator(new_store_name.upper(), new_operator_name.title())
+                    if success:
+                        st.success(msg)
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Gagal: {msg}")
+                else:
+                    st.error("Semua field wajib diisi.")
+
+        st.markdown("---")
+        
+        # --- View & Hapus Operator ---
+        st.subheader("2. Daftar Operator Aktif")
+        
+        df_all_operators = get_operators_by_store()
+        
+        if not df_all_operators.empty:
+            df_display = df_all_operators.rename(columns={'store_name': 'Cabang', 'operator_name': 'Nama Checker'})
+            df_display = df_display[['Cabang', 'Nama Checker', 'id']]
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+            # Form Hapus Operator
+            st.markdown("### 🗑️ Hapus Operator")
+            
+            # Buat list display untuk selectbox hapus
+            delete_options = ["-- Pilih Operator untuk Dihapus --"] + [
+                f"{row['Cabang']} - {row['Nama Checker']} (ID: {row['id'][:4]}...)" 
+                for _, row in df_display.iterrows()
+            ]
+            
+            operator_to_delete_display = st.selectbox(
+                "Pilih Operator yang Akan Dinonaktifkan Permanen:", 
+                options=delete_options,
+                key="delete_op_selector"
+            )
+
+            if operator_to_delete_display != "-- Pilih Operator untuk Dihapus --":
+                # Ekstrak ID dari string display
+                operator_id_prefix = operator_to_delete_display.split('(ID: ')[1].strip(')').split('...')[0]
+                
+                # Cari ID lengkap
+                operator_id = df_all_operators[df_all_operators['id'].str.startswith(operator_id_prefix)].iloc[0]['id']
+                
+                if st.button(f"🔥 KONFIRMASI HAPUS OPERATOR {operator_to_delete_display}", type="primary"):
+                    success, msg = delete_operator(operator_id)
+                    if success:
+                        st.success(msg)
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error(f"Gagal menghapus: {msg}")
+        else:
+            st.info("Belum ada operator yang terdaftar.")
+            
+
     with tab_maintenance:
         st.header("🔧 Debugging & Cache Maintenance")
         st.caption("Gunakan ini hanya jika Anda mendapat error aneh setelah mengganti Kunci API atau RLS.")
@@ -1131,9 +1286,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.26", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.27", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.26")
+    st.sidebar.title("GR Validation Apps v1.27")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
@@ -1141,6 +1296,9 @@ def main():
         if pwd == "admin123": page_admin()
 
 if __name__ == "__main__":
+    # Inisialisasi default session state keys
     if SESSION_KEY_CHECKER not in st.session_state:
         st.session_state[SESSION_KEY_CHECKER] = "-- Pilih Petugas --"
+    if 'selected_store' not in st.session_state:
+        st.session_state['selected_store'] = "-- Pilih Cabang --"
     main()
