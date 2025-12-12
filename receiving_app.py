@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.12 - Auto-Healing Connection] ---
+# --- KONFIGURASI [v1.13 - Batch SN Input] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -402,7 +402,7 @@ def page_checker():
         st.progress(progress_percent)
     st.markdown("---")
 
-    # [1] LIST BARANG NON-SN
+    # [1] LIST BARANG NON-SN (TIDAK BERUBAH)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)})")
 
@@ -421,7 +421,6 @@ def page_checker():
             notes_key = f"notes_non_{item_id}"
             current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
             
-            # Perubahan: expanded=False (Tertutup secara default)
             with st.expander(header_text, expanded=False):
                 col_info, col_input = st.columns([1.5, 1.5])
                 
@@ -448,16 +447,15 @@ def page_checker():
                         elif not conflict:
                             st.info("Tidak ada perubahan yang tersimpan.")
                         elif conflict:
-                             # FIX v1.12: Auto-Heal untuk mengatasi cache RLS
                              st.error("Gagal simpan Non-SN. Mencoba perbaikan otomatis (cache clear)...")
                              st.cache_resource.clear()
                              st.rerun()
                             
     st.markdown("---")
 
-    # [2] LIST BARANG SN
+    # [2] LIST BARANG SN (MODEL INPUT BATCH BARU)
     if not df_sn.empty:
-        st.subheader(f"📋 SN Items ({len(df_sn)})")
+        st.subheader(f"📋 SN Items ({len(df_sn)}) - Batch Input")
         
         for index, row in df_sn.iterrows():
             item_id = row['id']
@@ -473,97 +471,111 @@ def page_checker():
             
             header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | SN Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}]"
             
-            sn_input_key = f"new_sn_input_{item_id}"
-            notes_key = f"notes_sn_{item_id}"
+            notes_key = f"notes_sn_batch_{item_id}"
             
-            current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
-
-            # Perubahan: expanded=False (Tertutup secara default)
+            # --- Perubahan di sini: Menggunakan Text Area Global untuk SN ---
             with st.expander(header_text, expanded=False):
                 
-                # --- INPUT SN BARU ---
-                st.markdown("##### 📝 Input/Scan Serial Number (SN)")
-                col_sn_in, col_sn_jenis, col_sn_add = st.columns([2, 1.5, 1])
+                # Menampilkan SN List yang sudah ada
+                if current_sn_list:
+                    st.markdown("##### 🔍 Daftar SN Tercatat (Jangan diubah di sini):")
+                    # Menggabungkan SN yang sudah ada menjadi string untuk ditampilkan
+                    sn_display = "\n".join(current_sn_list)
+                    st.code(sn_display, language='text')
+                    st.caption(f"Total SN saat ini: {qty_fisik}")
+                else:
+                    st.info("Belum ada Serial Number tercatat.")
+                    
+                st.divider()
 
-                new_sn_input = col_sn_in.text_input("SN", key=sn_input_key, placeholder="Scan atau ketik SN di sini", label_visibility="collapsed").strip()
+                # --- Input Batch ---
+                st.markdown("##### 📝 Scan/Input SN Batch (Satu SN per Baris)")
                 
-                # Menggunakan default_jenis dari database saat ini sebagai default radio
-                radio_jenis_sn_key = f"jenis_sn_input_{item_id}"
-                
-                if radio_jenis_sn_key not in st.session_state:
-                     st.session_state[radio_jenis_sn_key] = default_jenis
-                
-                new_sn_jenis = col_sn_jenis.radio("Tujuan Alokasi SN", ['Stok', 'Display'], index=['Stok', 'Display'].index(st.session_state[radio_jenis_sn_key]), horizontal=True, key=radio_jenis_sn_key)
+                col_in, col_jenis = st.columns([2, 1])
 
-                # Logika Penambahan SN
-                if col_sn_add.button("➕ Tambah SN", key=f"add_sn_btn_{item_id}", use_container_width=True) and new_sn_input:
-                    # Cek duplikasi SN di list yang sudah ada
-                    if new_sn_input in current_sn_list:
-                        st.warning(f"SN `{new_sn_input}` sudah ada di list.")
-                    else:
-                        current_sn_list.append(new_sn_input)
-                        # Simpan ke DB langsung, agar SN yang ditambahkan oleh Checker lain terlihat
-                        updates, conflict = handle_update_sn_list(row, current_sn_list, new_sn_jenis, final_nama_user, loaded_time, current_notes)
+                # Text area untuk menampung semua scan (SN dipisahkan oleh Enter/Baris Baru)
+                batch_input = col_in.text_area(
+                    "SN List (Scan semua SN di sini)", 
+                    key=f"batch_sn_input_{item_id}", 
+                    placeholder="Scan SN pertama...\nScan SN kedua...\n[Tekan Ctrl+Enter atau Tombol Simpan]",
+                    height=200
+                )
+                
+                # Tujuan Alokasi SN
+                new_jenis = col_jenis.radio(
+                    "Tujuan Alokasi (untuk SN yang akan di-submit)", 
+                    ['Stok', 'Display'], 
+                    index=['Stok', 'Display'].index(default_jenis), 
+                    key=f"jenis_sn_batch_{item_id}"
+                )
+                
+                keterangan_batch = st.text_area("Keterangan/Isu Tambahan", value="", key=notes_key, height=50)
+
+                # Tombol Simpan Batch
+                if st.button("💾 SIMPAN SN BATCH INI", key=f"btn_sn_batch_{item_id}", type="primary", use_container_width=True):
+                    
+                    # 1. Proses Input Batch
+                    submitted_sns = [s.strip() for s in batch_input.split('\n') if s.strip()]
+                    
+                    if not submitted_sns and not keterangan_batch:
+                         st.warning("Tidak ada SN baru atau keterangan yang dimasukkan.")
+                         st.stop()
+                         
+                    # 2. Gabungkan dengan SN Lama dan Hapus Duplikasi (Mempertahankan SN lama)
+                    final_sn_list = current_sn_list[:]
+                    new_count = 0
+                    
+                    for sn in submitted_sns:
+                        if sn not in final_sn_list:
+                            final_sn_list.append(sn)
+                            new_count += 1
+                        else:
+                            st.warning(f"SN `{sn}` sudah ada, dilewati.")
+                            
+                    # 3. Keterangan: Jika ada keterangan baru, timpa keterangan lama (untuk item Non-SN)
+                    keterangan_to_save = keterangan_batch if keterangan_batch.strip() else (row.get('keterangan') if row.get('keterangan') is not None else None)
+
+
+                    # 4. Simpan ke Database
+                    updates, conflict = handle_update_sn_list(row, final_sn_list, new_jenis, final_nama_user, loaded_time, keterangan_to_save)
+
+                    if not conflict and updates > 0:
+                        st.toast(f"✅ {new_count} SN baru ditambahkan! Total: {len(final_sn_list)}", icon="💾")
+                        st.session_state[f"batch_sn_input_{item_id}"] = "" # Clear input area
+                        time.sleep(0.5) 
+                        st.rerun()
+                    elif conflict:
+                         st.error("Gagal simpan SN. Mencoba perbaikan otomatis (cache clear)...")
+                         st.cache_resource.clear()
+                         st.rerun()
+                    elif not submitted_sns and updates == 0:
+                         st.info("Tidak ada SN baru yang dimasukkan untuk disimpan.")
+                        
+                # Tambahkan fitur penghapusan manual jika diperlukan
+                if current_sn_list:
+                    st.divider()
+                    st.markdown("##### 🗑️ Hapus SN (Manual)")
+                    
+                    # Dropdown untuk memilih SN yang ingin dihapus
+                    sn_to_remove = st.selectbox(
+                        "Pilih SN untuk Dihapus", 
+                        options=[""] + current_sn_list, 
+                        key=f"remove_select_{item_id}"
+                    )
+                    
+                    if sn_to_remove and st.button(f"HAPUS SN: {sn_to_remove}", key=f"btn_remove_{item_id}"):
+                        temp_sn_list = current_sn_list[:]
+                        temp_sn_list.remove(sn_to_remove)
+                        
+                        updates, conflict = handle_update_sn_list(row, temp_sn_list, default_jenis, final_nama_user, loaded_time, row.get('keterangan'))
 
                         if not conflict and updates > 0:
-                            st.toast(f"✅ SN {new_sn_input} ditambahkan! Total {len(current_sn_list)}")
-                            time.sleep(0.5) 
+                            st.toast(f"❌ SN {sn_to_remove} dihapus.")
                             st.rerun()
                         elif conflict:
-                             # FIX v1.12: Auto-Heal untuk mengatasi cache RLS
-                             st.error("Gagal simpan SN. Mencoba perbaikan otomatis (cache clear)...")
-                             st.cache_resource.clear()
-                             st.rerun()
-                        else:
-                             st.error("❌ Gagal menyimpan SN. Coba muat ulang data atau periksa konsol browser untuk error RLS/API.")
-                        
-                # --- TAMPILAN SN LIST DAN REMOVE ---
-                st.markdown("##### 🔍 Daftar SN Tercatat:")
-                
-                # Tampilkan SN List yang sudah ada di DB (current_sn_list)
-                if current_sn_list:
-                    for idx, sn in enumerate(current_sn_list):
-                        col_sn_disp, col_sn_rem = st.columns([3, 1])
-                        col_sn_disp.markdown(f"`{sn}`")
-                        
-                        # Tombol Hapus SN
-                        if col_sn_rem.button("❌ Hapus", key=f"remove_sn_{item_id}_{idx}", use_container_width=True):
-                            temp_sn_list = current_sn_list[:]
-                            temp_sn_list.pop(idx)
-                            
-                            # Simpan ke DB
-                            updates, conflict = handle_update_sn_list(row, temp_sn_list, default_jenis, final_nama_user, loaded_time, current_notes)
-
-                            if not conflict and updates > 0:
-                                st.toast(f"❌ SN {sn} dihapus.")
-                                st.rerun()
-                            elif conflict:
-                                # FIX v1.12: Auto-Heal untuk mengatasi cache RLS
-                                st.error("Gagal menghapus SN. Mencoba perbaikan otomatis (cache clear)...")
-                                st.cache_resource.clear()
-                                st.rerun()
-
-                else:
-                    st.info("Belum ada Serial Number yang dimasukkan.")
-                
-                
-                st.divider()
-                
-                # --- SAVE BUTTON FINAL ---
-                # Ini untuk update JENIS atau KETERANGAN saja. SN sudah diupdate secara real-time saat ADD/REMOVE.
-                keterangan_sn = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
-
-                if st.button("💾 Simpan Keterangan & Alokasi", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
-                    final_jenis = st.session_state[radio_jenis_sn_key]
-                    updates, conflict = handle_update_sn_list(row, current_sn_list, final_jenis, final_nama_user, loaded_time, keterangan_sn.strip())
-                    
-                    if not conflict and updates > 0:
-                        st.toast(f"✅ Alokasi dan Keterangan untuk {row['nama_barang']} disimpan!", icon="💾")
-                        time.sleep(0.5)
-                        st.rerun()
-                    elif not conflict:
-                        st.info("Tidak ada perubahan Alokasi/Keterangan yang tersimpan.")
-
+                            st.error("Gagal menghapus SN. Mencoba perbaikan otomatis (cache clear)...")
+                            st.cache_resource.clear()
+                            st.rerun()
 
 # --- FUNGSI ADMIN ---
 def page_admin():
@@ -684,8 +696,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.12", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.12")
+    st.set_page_config(page_title="GR Validation v1.13", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.13")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
