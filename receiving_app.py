@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.3 - Final NaN Fix] ---
+# --- KONFIGURASI [v1.4 - Robust NaN Fix] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -53,7 +53,7 @@ def parse_supabase_timestamp(timestamp_str):
 def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+    with pd.ExcelWriter(output, engine='openypyxl') as writer:
         cols = ['gr_number', 'sku', 'nama_barang', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'jenis', 'sn_list', 'updated_by', 'updated_at']
         
         df_export = df.copy()
@@ -147,41 +147,44 @@ def process_and_insert(df, gr_number):
     if not all(col in df.columns for col in required_cols):
         return False, f"File Excel harus memiliki kolom: {', '.join(required_cols)}"
         
-    # === [FIX v1.3: PRE-PROCESSING NaN] ===
-    # Mengganti semua NaN di seluruh DataFrame dengan None (untuk text/optional fields)
-    df = df.where(pd.notna, None)
-    
-    # Memastikan Qty PO (Integer wajib) diisi 0 jika kosong
+    # === [FIX v1.4: Robust NaN Handling] ===
+    # Mengisi NaN pada Qty PO dengan 0, lalu paksa ke integer
     if 'Qty PO' in df.columns:
-        # Mengganti None/NaN dengan 0 lalu memastikan tipe data integer
         df['Qty PO'] = df['Qty PO'].fillna(0).astype(int)
+    
+    # Mengisi NaN pada kolom teks dengan string kosong ('')
+    # Ini memastikan semua kolom yang tidak wajib diisi numerik aman dari float/nan
+    df['Tujuan (Stok/Display)'] = df['Tujuan (Stok/Display)'].fillna('')
+    df['Keterangan Awal'] = df['Keterangan Awal'].fillna('')
+    df['SKU'] = df['SKU'].fillna('')
+    df['Nama Barang'] = df['Nama Barang'].fillna('')
+    df['Tipe Barang'] = df['Tipe Barang'].fillna('NON-SN')
 
     data_to_insert = []
     
     for _, row in df.iterrows():
         
-        # 1. Tujuan (Stok/Display) - Jika None, set default
-        jenis_val = row.get('Tujuan (Stok/Display)')
-        if jenis_val is None or str(jenis_val).strip() == '':
+        # 1. Tujuan (Stok/Display) - Ambil string, jika kosong set default
+        jenis_val = str(row.get('Tujuan (Stok/Display)')).strip()
+        if jenis_val == '':
             jenis_val = 'Stok'
 
-        # 2. Keterangan Awal - Akan menjadi None jika kosong (sudah dibersihkan di atas)
-        keterangan_val = row.get('Keterangan Awal')
+        # 2. Keterangan Awal - Akan menjadi None jika string kosong
+        keterangan_val = str(row.get('Keterangan Awal')).strip()
+        keterangan_val = keterangan_val if keterangan_val else None
         
         # 3. Kategori Barang (Tipe Barang)
-        tipe_barang = row.get('Tipe Barang')
-        if tipe_barang is None: tipe_barang = 'NON-SN'
-
-        is_sn_item = str(tipe_barang).upper() == 'SN'
+        tipe_barang = str(row.get('Tipe Barang')).upper()
+        is_sn_item = tipe_barang == 'SN'
 
         item = {
-            "sku": str(row.get('SKU', '')).strip() if row.get('SKU') is not None else '',
-            "nama_barang": str(row.get('Nama Barang', 'Unknown Item')).strip() if row.get('Nama Barang') is not None else 'Unknown Item',
-            "kategori_barang": str(tipe_barang).upper(),
+            "sku": str(row.get('SKU')).strip(),
+            "nama_barang": str(row.get('Nama Barang')).strip(),
+            "kategori_barang": tipe_barang,
             "qty_po": int(row.get('Qty PO', 0)),
             "qty_fisik": 0, "updated_by": "-", "is_active": True, "gr_number": gr_number,
-            "jenis": str(jenis_val).strip(),
-            "keterangan": keterangan_val, # Dibiarkan None jika tidak ada
+            "jenis": jenis_val,
+            "keterangan": keterangan_val, 
             "sn_list": [] if is_sn_item else None
         }
         data_to_insert.append(item)
@@ -202,6 +205,7 @@ def process_and_insert(df, gr_number):
     except APIError as e:
          return False, f"Gagal API Supabase: {e.message}. Pastikan kolom DB sudah dibuat dengan benar."
     except Exception as e:
+         # Menangkap error jika masih ada nan tersembunyi
          return False, f"Error saat insert data: {str(e)}"
 
 def delete_active_session():
@@ -652,8 +656,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.3", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.3")
+    st.set_page_config(page_title="GR Validation v1.4", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.4")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
