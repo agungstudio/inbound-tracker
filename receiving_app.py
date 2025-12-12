@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.21 - Final GR Filtering Fix] ---
+# --- KONFIGURASI [v1.22 - QoL & Responsive Design] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -222,6 +222,16 @@ def delete_active_session():
         supabase.table(RECEIVING_TABLE).delete().eq("is_active", True).execute()
         return True, "Sesi aktif berhasil dihapus total."
     except Exception as e: return False, str(e)
+
+def delete_blind_receive_item(item_id):
+    """FIX V1.22: Hapus item Blind Receive berdasarkan ID"""
+    try:
+        supabase.table(RECEIVING_TABLE).delete().eq("id", item_id).execute()
+        return True, "Item Blind Receive berhasil dihapus."
+    except Exception as e:
+        error_msg = f"API Error: {str(e)}"
+        st.error(f"❌ Gagal menghapus item. DETAIL: {error_msg}")
+        return False, error_msg
     
 def get_master_template_excel_receiving():
     """Template untuk upload Master GR/PO"""
@@ -395,6 +405,25 @@ def handle_blind_insert(brand, sku, qty, sn_list, tipe_barang, jenis, keterangan
 
 # --- HALAMAN CHECKER ---
 def page_checker():
+    # FIX V1.22: Injeksi CSS untuk membuat input teks lebar penuh di mobile
+    st.markdown("""
+        <style>
+        /* Memaksa elemen input lebar penuh di layar kecil, terutama di tab Scanner */
+        textarea, input[type="text"], input[type="number"] {
+            width: 100% !important;
+            min-width: unset !important;
+        }
+        /* Memperbaiki tampilan form di layar kecil */
+        .stForm {
+            width: 100%;
+        }
+        /* Memperbaiki tampilan selectbox di header SN Scanner */
+        [data-testid="stForm"] [data-testid="stSelectbox"] {
+            min-width: 100%;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
     # FIX V1.19: Mengambil SEMUA sesi aktif
     active_grs = get_active_session_info()
     
@@ -540,11 +569,30 @@ def page_checker():
                 )
                 
                 st.markdown("##### 📝 Scan SN di Bawah (Satu SN per Baris)")
-                batch_input = st.text_area(
+                
+                col_scan, col_exist = st.columns([2, 1])
+                
+                # Input Area
+                batch_input = col_scan.text_area(
                     "Scan SN List", 
                     placeholder="Scan SN pertama...\nScan SN kedua...\n[Tekan Ctrl+Enter atau Tombol Simpan]",
                     height=250
                 )
+                
+                # FIX V1.22: Display SN yang sudah tercatat
+                if selected_row:
+                    current_sn_list = selected_row.get('sn_list', [])
+                    if current_sn_list:
+                        sn_display = "\n".join(current_sn_list)
+                        col_exist.text_area(
+                            f"SN Sudah Tercatat ({len(current_sn_list)})",
+                            value=sn_display,
+                            height=250,
+                            disabled=True
+                        )
+                    else:
+                        col_exist.info("Belum ada SN tercatat.")
+
 
                 if st.form_submit_button("💾 SUBMIT & SIMPAN SN BATCH", type="primary", use_container_width=True):
                     
@@ -828,7 +876,30 @@ def page_admin():
             c3.metric("Total Qty Fisik", total_fisik)
             c4.metric("Total Selisih", total_diff)
             
-            st.dataframe(df[['gr_number', 'sku', 'nama_barang', 'kategori_barang', 'jenis', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'updated_by', 'updated_at']], use_container_width=True)
+            st.dataframe(df[['gr_number', 'sku', 'nama_barang', 'kategori_barang', 'jenis', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'updated_by', 'updated_at']])
+            
+            # --- FIX V1.22: Hapus Item Blind Receive ---
+            if report_name == "BLIND-RECEIVE" and is_active_session:
+                st.markdown("### 🗑️ Hapus Item Blind Receive (Review)")
+                blind_items = df[['id', 'nama_barang', 'sku', 'qty_fisik', 'keterangan']].copy()
+                blind_items['Display'] = blind_items['nama_barang'] + " (" + blind_items['sku'] + f") - Qty: {blind_items['qty_fisik']}"
+                
+                item_to_delete_id = st.selectbox(
+                    "Pilih Item Blind Receive untuk Dihapus:", 
+                    options=["-- Pilih Item --"] + list(blind_items['Display']),
+                    key="blind_delete_selector"
+                )
+                
+                if item_to_delete_id != "-- Pilih Item --":
+                    item_id = blind_items[blind_items['Display'] == item_to_delete_id]['id'].iloc[0]
+                    if st.button(f"🔥 KONFIRMASI HAPUS: {item_to_delete_id}", type="primary"):
+                        success, msg = delete_blind_receive_item(item_id)
+                        if success:
+                            st.success(f"✅ Item '{item_to_delete_id}' berhasil dihapus.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Gagal menghapus: {msg}")
             
             st.markdown("### 📥 Download Laporan")
             tgl = datetime.now().strftime('%Y-%m-%d')
@@ -840,6 +911,7 @@ def page_admin():
                      try:
                         supabase.table(RECEIVING_TABLE).update({"is_active": False}).eq("gr_number", report_name).execute()
                         st.success(f"Sesi {report_name} berhasil diarsipkan!")
+                        st.cache_data.clear()
                         time.sleep(2); st.rerun()
                      except Exception as e:
                          st.error(f"Gagal mengarsipkan: {e}")
@@ -860,7 +932,7 @@ def page_admin():
                 if st.session_state.get('confirm_reset_state', False): 
                     with st.spinner("Menghapus Sesi Aktif..."):
                         ok, msg = delete_active_session()
-                        if ok: st.success("Semua Sesi Aktif berhasil di-reset!"); time.sleep(2); st.rerun()
+                        if ok: st.success("Semua Sesi Aktif berhasil di-reset!"); st.cache_data.clear(); time.sleep(2); st.rerun()
                         else: st.error(f"Gagal: {msg}")
                 else:
                     st.error("Harap centang konfirmasi dulu.")
@@ -879,9 +951,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.21", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.22", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.21")
+    st.sidebar.title("GR Validation Apps v1.22")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
