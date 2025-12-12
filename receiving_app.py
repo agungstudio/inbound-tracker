@@ -5,24 +5,38 @@ from datetime import datetime, timezone
 import time
 import io
 import json
+import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.0 - Receiving App] ---
-SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
+# --- KONFIGURASI [v1.1 - Stable with Logging] ---
+SUPABASE_URL = st.secrets.get("SUPABASE_URL")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
 RESET_PIN = "123456" 
 SESSION_KEY_CHECKER = "current_checker_name_receiving" 
-RECEIVING_TABLE = "receiving_validation" # Nama Tabel Baru
+RECEIVING_TABLE = "receiving_validation" # Nama Tabel di Supabase
 
-if not SUPABASE_URL:
-    st.error("⚠️ Konfigurasi Database Belum Ada. Harap cek secrets.toml.")
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("⚠️ KONFIGURASI DATABASE BELUM ADA.")
+    st.markdown("Harap masukkan `SUPABASE_URL` dan `SUPABASE_KEY` di **Secrets Streamlit Cloud** atau file `.streamlit/secrets.toml`.")
     st.stop()
 
 @st.cache_resource
 def init_connection():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    try:
+        logging.info("Attempting to connect to Supabase...")
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Quick check connection
+        client.table(RECEIVING_TABLE).select("id").limit(0).execute()
+        return client
+    except Exception as e:
+        logging.error(f"Failed to connect to Supabase: {e}")
+        st.error("❌ KONEKSI DATABASE GAGAL. Pastikan URL dan Kunci Supabase Anda benar.")
+        st.stop()
 
 supabase = init_connection()
 
@@ -40,13 +54,10 @@ def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Kolom yang relevan untuk laporan akhir
         cols = ['gr_number', 'sku', 'nama_barang', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'jenis', 'sn_list', 'updated_by', 'updated_at']
         
-        # Penyesuaian sebelum ekspor
         df_export = df.copy()
         if 'sn_list' in df_export.columns:
-             # Konversi list SN ke format string yang mudah dibaca
              df_export['sn_list'] = df_export['sn_list'].apply(lambda x: "; ".join(x) if isinstance(x, list) else (x if pd.notna(x) else ''))
         
         df_export['qty_diff'] = df_export['qty_fisik'] - df_export['qty_po']
@@ -77,11 +88,12 @@ def convert_df_to_excel(df, sheet_name='Data_Receiving'):
 def get_active_session_info():
     """Mengambil GR number sesi aktif saat ini"""
     try:
-        # Cari GR number yang aktif
         res = supabase.table(RECEIVING_TABLE).select("gr_number").eq("is_active", True).limit(1).execute()
         if res.data: return res.data[0]['gr_number']
         return "Belum Ada Sesi Aktif"
-    except Exception: return "-"
+    except Exception as e:
+        logging.warning(f"Failed to get active session info: {e}")
+        return "-"
 
 def get_data(gr_number=None, search_term=None, only_active=True):
     """Mengambil data GR untuk dicek"""
@@ -90,16 +102,20 @@ def get_data(gr_number=None, search_term=None, only_active=True):
     elif gr_number: query = query.eq("gr_number", gr_number)
     
     start_time = datetime.now(timezone.utc)
-    response = query.order("nama_barang").execute()
+    try:
+        response = query.order("nama_barang").execute()
+    except Exception as e:
+        st.error(f"Gagal mengambil data dari Supabase. Cek RLS: {e}")
+        return pd.DataFrame()
+        
     df = pd.DataFrame(response.data)
 
     if 'keterangan' not in df.columns: df['keterangan'] = ""
-    if 'jenis' not in df.columns: df['jenis'] = "Stok" # Default ke Stok jika master tidak ada
+    if 'jenis' not in df.columns: df['jenis'] = "Stok"
 
-    # Deserialisasi sn_list (karena Supabase menyimpan array sebagai string JSON jika diupload dari Streamlit)
+    # Deserialisasi sn_list
     if 'sn_list' in df.columns:
         df['sn_list'] = df['sn_list'].apply(lambda x: json.loads(x) if isinstance(x, str) and x.startswith('[') else (x if isinstance(x, list) else []))
-
 
     if not df.empty and search_term:
         df = df[df['nama_barang'].str.contains(search_term, case=False, na=False) | 
@@ -128,25 +144,23 @@ def process_and_insert(df, gr_number):
     """Memproses DF Master GR dan menginput ke DB"""
     data_to_insert = []
     
-    # Kolom wajib dari template: 'SKU', 'Nama Barang', 'Qty PO', 'Tipe Barang (SN/Non-SN)'
     required_cols = ['SKU', 'Nama Barang', 'Qty PO', 'Tipe Barang']
     if not all(col in df.columns for col in required_cols):
         return False, f"File Excel harus memiliki kolom: {', '.join(required_cols)}"
 
     for _, row in df.iterrows():
-        # Kolom opsional (jika tidak ada, gunakan default)
         jenis_default = row.get('Tujuan (Stok/Display)', 'Stok')
         keterangan_default = row.get('Keterangan Awal', None)
 
         item = {
             "sku": str(row.get('SKU', '')).strip(),
             "nama_barang": row.get('Nama Barang', 'Unknown Item'),
-            "kategori_barang": str(row.get('Tipe Barang', 'NON-SN')).upper(), # SN atau NON-SN
+            "kategori_barang": str(row.get('Tipe Barang', 'NON-SN')).upper(),
             "qty_po": int(row.get('Qty PO', 0)),
             "qty_fisik": 0, "updated_by": "-", "is_active": True, "gr_number": gr_number,
             "jenis": jenis_default,
             "keterangan": keterangan_default,
-            "sn_list": [] if str(row.get('Tipe Barang', 'NON-SN')).upper() == 'SN' else None # Inisialisasi list kosong untuk SN
+            "sn_list": [] if str(row.get('Tipe Barang', 'NON-SN')).upper() == 'SN' else None
         }
         data_to_insert.append(item)
     
@@ -160,12 +174,11 @@ def process_and_insert(df, gr_number):
         # Masukkan data baru
         batch_size = 500
         for i in range(0, len(data_to_insert), batch_size):
-            # Supabase APIError akan terlempar jika ada masalah koneksi/data
             supabase.table(RECEIVING_TABLE).insert(data_to_insert[i:i+batch_size]).execute()
             
         return True, len(data_to_insert)
     except APIError as e:
-         return False, f"Gagal API Supabase: {e.message}"
+         return False, f"Gagal API Supabase: {e.message}. Pastikan kolom DB sudah dibuat dengan benar."
     except Exception as e:
          return False, f"Error saat insert data: {str(e)}"
 
@@ -258,7 +271,7 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
     
     keterangan_to_save = keterangan if keterangan.strip() else None
 
-    is_sn_list_changed = set(original_sn_list) != set(new_sn_list)
+    is_sn_list_changed = set(map(str.strip, original_sn_list)) != set(map(str.strip, new_sn_list))
     is_jenis_changed = (original_jenis != new_jenis)
     is_notes_changed = (original_notes.strip() != (keterangan_to_save.strip() if keterangan_to_save else ''))
     
@@ -299,7 +312,6 @@ def page_checker():
     active_gr = get_active_session_info()
     st.title(f"📱 Validasi GR: {active_gr}")
     
-    # [v1.0] Inisialisasi session state untuk nama Checker
     if SESSION_KEY_CHECKER not in st.session_state:
         st.session_state[SESSION_KEY_CHECKER] = "-- Pilih Petugas --"
     
@@ -309,7 +321,6 @@ def page_checker():
     except ValueError:
         default_index = 0 
 
-    # Area Pemilihan Nama
     with st.container():
         c_pemeriksa, c_placeholder = st.columns([1, 3])
         with c_pemeriksa:
@@ -346,7 +357,6 @@ def page_checker():
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
     
-    # Progress Monitoring - QTY Based
     total_qty_po = df['qty_po'].sum()
     total_qty_fisik_tercatat = df['qty_fisik'].sum()
     progress_percent = total_qty_fisik_tercatat / total_qty_po if total_qty_po > 0 else 0
@@ -362,7 +372,7 @@ def page_checker():
         st.progress(progress_percent)
     st.markdown("---")
 
-    # [1] LIST BARANG NON-SN (QTY Input + Alokasi Jenis)
+    # [1] LIST BARANG NON-SN
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)})")
 
@@ -381,7 +391,7 @@ def page_checker():
             notes_key = f"notes_non_{item_id}"
             current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
             
-            with st.expander(header_text, expanded=selisih_po != 0 and default_qty == 0): # Buka jika ada selisih atau belum diisi
+            with st.expander(header_text, expanded=selisih_po != 0 and default_qty == 0):
                 col_info, col_input = st.columns([1.5, 1.5])
                 
                 with col_info:
@@ -393,7 +403,6 @@ def page_checker():
                 with col_input:
                     new_qty = st.number_input("JML FISIK DITERIMA", value=default_qty, min_value=0, step=1, key=f"qty_non_{item_id}")
                     
-                    # Alokasi Tujuan (Stok/Display) - WAJIB DIPILIH
                     new_jenis = st.radio("Tujuan Alokasi", ['Stok', 'Display'], index=['Stok', 'Display'].index(default_jenis), horizontal=True, key=f"jenis_non_{item_id}")
                     
                     keterangan = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
@@ -410,7 +419,7 @@ def page_checker():
                             
     st.markdown("---")
 
-    # [2] LIST BARANG SN (Input SN Manual + Alokasi Jenis)
+    # [2] LIST BARANG SN
     if not df_sn.empty:
         st.subheader(f"📋 SN Items ({len(df_sn)})")
         
@@ -439,44 +448,56 @@ def page_checker():
                 st.markdown("##### 📝 Input/Scan Serial Number (SN)")
                 col_sn_in, col_sn_jenis, col_sn_add = st.columns([2, 1.5, 1])
 
-                new_sn_input = col_sn_in.text_input("SN", key=sn_input_key, placeholder="Scan atau ketik SN di sini", label_visibility="collapsed")
-                new_sn_jenis = col_sn_jenis.radio("Tujuan Alokasi SN", ['Stok', 'Display'], index=['Stok', 'Display'].index(default_jenis), horizontal=True, key=f"jenis_sn_input_{item_id}")
+                new_sn_input = col_sn_in.text_input("SN", key=sn_input_key, placeholder="Scan atau ketik SN di sini", label_visibility="collapsed").strip()
                 
+                # Menggunakan default_jenis dari database saat ini sebagai default radio
+                radio_jenis_sn_key = f"jenis_sn_input_{item_id}"
+                
+                if radio_jenis_sn_key not in st.session_state:
+                     st.session_state[radio_jenis_sn_key] = default_jenis
+                
+                new_sn_jenis = col_sn_jenis.radio("Tujuan Alokasi SN", ['Stok', 'Display'], index=['Stok', 'Display'].index(st.session_state[radio_jenis_sn_key]), horizontal=True, key=radio_jenis_sn_key)
+
                 # Logika Penambahan SN
                 if col_sn_add.button("➕ Tambah SN", key=f"add_sn_btn_{item_id}", use_container_width=True) and new_sn_input:
+                    # Cek duplikasi SN di list yang sudah ada
                     if new_sn_input in current_sn_list:
                         st.warning(f"SN `{new_sn_input}` sudah ada di list.")
                     else:
-                        current_sn_list.append(new_sn_input.strip())
-                        st.session_state[f"sn_list_temp_{item_id}"] = current_sn_list
-                        st.session_state[f"jenis_temp_{item_id}"] = new_sn_jenis
-                        st.toast(f"✅ SN {new_sn_input} ditambahkan! Total {len(current_sn_list)}")
-                        time.sleep(0.1) # Untuk memastikan toast muncul
-                        st.session_state[sn_input_key] = "" # Clear input
-                        st.rerun() 
+                        current_sn_list.append(new_sn_input)
+                        # Simpan ke DB langsung, agar SN yang ditambahkan oleh Checker lain terlihat
+                        updates, conflict = handle_update_sn_list(row, current_sn_list, new_sn_jenis, final_nama_user, loaded_time, current_notes)
 
-                # Set state awal untuk tampilan SN List
-                if f"sn_list_temp_{item_id}" not in st.session_state:
-                    st.session_state[f"sn_list_temp_{item_id}"] = current_sn_list
-                if f"jenis_temp_{item_id}" not in st.session_state:
-                    st.session_state[f"jenis_temp_{item_id}"] = default_jenis
-                
+                        if not conflict and updates > 0:
+                            st.toast(f"✅ SN {new_sn_input} ditambahkan! Total {len(current_sn_list)}")
+                            time.sleep(0.5) 
+                            st.session_state[sn_input_key] = "" # Clear input
+                            st.rerun()
+                        elif conflict:
+                             st.warning("Gagal menambahkan SN karena ada konflik data.")
+                        
                 # --- TAMPILAN SN LIST DAN REMOVE ---
                 st.markdown("##### 🔍 Daftar SN Tercatat:")
                 
-                st.caption(f"Alokasi Global Saat Ini: **{st.session_state[f'jenis_temp_{item_id}']}**")
-                
-                temp_sn_list = st.session_state[f"sn_list_temp_{item_id}"]
-                if temp_sn_list:
-                    # Tampilkan list SN dan tombol hapus
-                    for idx, sn in enumerate(temp_sn_list):
+                # Tampilkan SN List yang sudah ada di DB (current_sn_list)
+                if current_sn_list:
+                    for idx, sn in enumerate(current_sn_list):
                         col_sn_disp, col_sn_rem = st.columns([3, 1])
                         col_sn_disp.markdown(f"`{sn}`")
+                        
+                        # Tombol Hapus SN
                         if col_sn_rem.button("❌ Hapus", key=f"remove_sn_{item_id}_{idx}", use_container_width=True):
+                            temp_sn_list = current_sn_list[:]
                             temp_sn_list.pop(idx)
-                            st.session_state[f"sn_list_temp_{item_id}"] = temp_sn_list
-                            st.toast(f"❌ SN {sn} dihapus.")
-                            st.rerun()
+                            
+                            # Simpan ke DB
+                            updates, conflict = handle_update_sn_list(row, temp_sn_list, default_jenis, final_nama_user, loaded_time, current_notes)
+
+                            if not conflict and updates > 0:
+                                st.toast(f"❌ SN {sn} dihapus.")
+                                st.rerun()
+                            elif conflict:
+                                st.warning("Gagal menghapus SN karena ada konflik data.")
 
                 else:
                     st.info("Belum ada Serial Number yang dimasukkan.")
@@ -484,21 +505,20 @@ def page_checker():
                 
                 st.divider()
                 
-                # --- SAVE BUTTON ---
+                # --- SAVE BUTTON FINAL ---
+                # Ini untuk update JENIS atau KETERANGAN saja. SN sudah diupdate secara real-time saat ADD/REMOVE.
                 keterangan_sn = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
 
-                if st.button("💾 Simpan Final SN List", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
-                    final_sn_list = st.session_state[f"sn_list_temp_{item_id}"]
-                    final_jenis = st.session_state[f"jenis_temp_{item_id}"]
-
-                    updates, conflict = handle_update_sn_list(row, final_sn_list, final_jenis, final_nama_user, loaded_time, keterangan_sn.strip())
+                if st.button("💾 Simpan Keterangan & Alokasi", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
+                    final_jenis = st.session_state[radio_jenis_sn_key]
+                    updates, conflict = handle_update_sn_list(row, current_sn_list, final_jenis, final_nama_user, loaded_time, keterangan_sn.strip())
                     
                     if not conflict and updates > 0:
-                        st.toast(f"✅ {len(final_sn_list)} SN untuk {row['nama_barang']} disimpan dengan alokasi **{final_jenis}**!", icon="💾")
+                        st.toast(f"✅ Alokasi dan Keterangan untuk {row['nama_barang']} disimpan!", icon="💾")
                         time.sleep(0.5)
                         st.rerun()
                     elif not conflict:
-                        st.info("Tidak ada perubahan yang tersimpan.")
+                        st.info("Tidak ada perubahan Alokasi/Keterangan yang tersimpan.")
 
 
 # --- FUNGSI ADMIN ---
@@ -575,7 +595,16 @@ def page_admin():
             tgl = datetime.now().strftime('%Y-%m-%d')
             st.download_button(f"📥 Download Laporan {report_name}", convert_df_to_excel(df), f"Laporan_GR_{report_name}_{tgl}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             
-            # TODO: Tambahkan tombol "Arsipkan Sesi Ini" untuk set is_active = False
+            # Tambahkan fungsi arsip sesi yang aktif
+            if mode_view == "Sesi Aktif Sekarang" and active_gr != "Belum Ada Sesi Aktif":
+                if st.button(f"✅ ARSIPKAN SESI {active_gr}", type="secondary"):
+                     try:
+                        supabase.table(RECEIVING_TABLE).update({"is_active": False}).eq("gr_number", active_gr).execute()
+                        st.success(f"Sesi {active_gr} berhasil diarsipkan!")
+                        time.sleep(2); st.rerun()
+                     except Exception as e:
+                         st.error(f"Gagal mengarsipkan: {e}")
+
 
     with tab3:
         st.header("⚠️ DANGER ZONE")
@@ -601,8 +630,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.0", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.0")
+    st.set_page_config(page_title="GR Validation v1.1", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.1")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
@@ -611,7 +640,6 @@ def main():
         if pwd == "admin123": page_admin()
 
 if __name__ == "__main__":
-    # Inisialisasi awal untuk mencegah KeyError saat load pertama
     if SESSION_KEY_CHECKER not in st.session_state:
         st.session_state[SESSION_KEY_CHECKER] = "-- Pilih Petugas --"
     main()
