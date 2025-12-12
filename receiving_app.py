@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.13 - Batch SN Input] ---
+# --- KONFIGURASI [v1.14 - Global SN Scanner] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -281,6 +281,9 @@ def handle_update_non_sn(row, new_qty, new_jenis, nama_user, loaded_time, ketera
         except APIError as api_e:
             error_msg = f"API Error: {api_e.message}. Status Code: {api_e.code}" if hasattr(api_e, 'message') else str(api_e)
             st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. DETAIL: {error_msg}")
+            # Auto-Heal untuk mengatasi cache RLS
+            st.cache_resource.clear()
+            st.rerun()
             return 0, True 
         
     return 0, False # No change
@@ -333,6 +336,9 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
             # FIX v1.7: Tampilkan pesan API error spesifik dari Supabase
             error_msg = f"API Error: {api_e.message}. Status Code: {api_e.code}" if hasattr(api_e, 'message') else str(api_e)
             st.error(f"❌ Gagal Simpan Item SN {row['nama_barang']}. DETAIL RLS: {error_msg}")
+            # Auto-Heal untuk mengatasi cache RLS
+            st.cache_resource.clear()
+            st.rerun()
             return 0, True 
         
     return 0, False # No change
@@ -401,8 +407,101 @@ def page_checker():
         st.caption(f"Progress Total GR: {progress_percent * 100:.1f}%")
         st.progress(progress_percent)
     st.markdown("---")
+    
+    # =========================================================================
+    # GLOBAL SN SCANNER FORM (NEW METHOD)
+    # =========================================================================
+    if not df_sn.empty:
+        
+        st.subheader("⚡ Pemindaian Global SN (Scan Cepat)")
+        
+        # Opsi barang SN yang belum selesai divalidasi
+        sn_options_df = df_sn[df_sn['qty_fisik'] < df_sn['qty_po']]
+        
+        # Pilihan untuk Selectbox: SKU - Nama Barang (ID)
+        sn_select_options = ["-- Pilih Barang SN yang Discan --"] + [
+            f"{row['sku']} - {row['nama_barang']} (ID: {row['id'][:4]}...)" 
+            for _, row in df_sn.iterrows()
+        ]
+        
+        with st.form("global_sn_form", clear_on_submit=True):
+            
+            col_sku, col_jenis = st.columns([2, 1])
+            
+            selected_item_str = col_sku.selectbox(
+                "Pilih Barang SN yang Sedang Anda Scan", 
+                options=sn_select_options,
+                key="global_sn_selector"
+            )
 
+            # Cari ID barang yang dipilih
+            selected_id = None
+            selected_row = None
+            if "ID:" in selected_item_str:
+                item_id_part = selected_item_str.split('(ID: ')[1].strip(')')
+                selected_id = item_id_part.split('...')[0]
+                selected_row_match = df_sn[df_sn['id'].str.startswith(selected_id)].iloc[0]
+                selected_row = selected_row_match.to_dict()
+                
+            # Menggunakan jenis barang saat ini sebagai default radio
+            current_jenis = selected_row.get('jenis', 'Stok') if selected_row else 'Stok'
+            new_jenis = col_jenis.radio(
+                "Tujuan Alokasi SN", 
+                ['Stok', 'Display'], 
+                index=['Stok', 'Display'].index(current_jenis),
+            )
+            
+            st.markdown("##### 📝 Scan SN di Bawah (Satu SN per Baris)")
+            batch_input = st.text_area(
+                "Scan SN List", 
+                placeholder="Scan SN pertama...\nScan SN kedua...\n[Tekan Ctrl+Enter atau Tombol Simpan]",
+                height=250
+            )
+
+            if st.form_submit_button("💾 SUBMIT & SIMPAN SN BATCH", type="primary", use_container_width=True):
+                
+                if not selected_row:
+                    st.error("Pilih Barang SN yang valid terlebih dahulu.")
+                    st.stop()
+                    
+                submitted_sns = [s.strip() for s in batch_input.split('\n') if s.strip()]
+                
+                if not submitted_sns:
+                    st.warning("Tidak ada Serial Number yang dimasukkan.")
+                    st.stop()
+                
+                # Pemrosesan Batch
+                current_sn_list = selected_row.get('sn_list', [])
+                final_sn_list = current_sn_list[:]
+                new_count = 0
+                
+                for sn in submitted_sns:
+                    if sn not in final_sn_list:
+                        final_sn_list.append(sn)
+                        new_count += 1
+                    else:
+                        st.warning(f"SN `{sn}` sudah ada di list sebelumnya, dilewati.")
+                
+                # Keterangan diabaikan untuk Global Scan, hanya fokus pada SN/Jenis
+                updates, conflict = handle_update_sn_list(
+                    selected_row, final_sn_list, new_jenis, final_nama_user, loaded_time, 
+                    selected_row.get('keterangan')
+                )
+
+                if not conflict and updates > 0:
+                    st.success(f"✅ {new_count} SN baru ditambahkan untuk **{selected_row['nama_barang']}**! Total: {len(final_sn_list)}")
+                    time.sleep(1) 
+                    st.rerun() 
+                elif conflict:
+                     st.error("Gagal simpan SN. Mencoba perbaikan otomatis (cache clear)...")
+                     st.cache_resource.clear()
+                     st.rerun()
+
+        st.divider()
+
+    # =========================================================================
     # [1] LIST BARANG NON-SN (TIDAK BERUBAH)
+    # =========================================================================
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)})")
 
@@ -453,129 +552,35 @@ def page_checker():
                             
     st.markdown("---")
 
-    # [2] LIST BARANG SN (MODEL INPUT BATCH BARU)
+    # =========================================================================
+    # [2] LIST BARANG SN (DISPLAY ONLY)
+    # =========================================================================
     if not df_sn.empty:
-        st.subheader(f"📋 SN Items ({len(df_sn)}) - Batch Input")
-        
+        st.subheader(f"📋 Status Barang SN ({len(df_sn)})")
+
         for index, row in df_sn.iterrows():
             item_id = row['id']
             qty_po = row['qty_po']
-            current_sn_list = row.get('sn_list', [])
+            qty_fisik = len(row.get('sn_list', []))
             default_jenis = row['jenis']
-            
-            qty_fisik = len(current_sn_list)
             selisih_po = qty_fisik - qty_po
             
             status_text = "MATCH" if selisih_po == 0 else ("OVER" if selisih_po > 0 else "SHORT")
             status_color = "green" if selisih_po == 0 else "red"
             
-            header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | SN Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}]"
+            header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}] | Alokasi: {default_jenis}"
             
-            notes_key = f"notes_sn_batch_{item_id}"
-            
-            # --- Perubahan di sini: Menggunakan Text Area Global untuk SN ---
             with st.expander(header_text, expanded=False):
+                st.markdown(f"**SKU:** {row['sku']}")
+                st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
+                if row.get('keterangan'): st.markdown(f"**Catatan:** `{row['keterangan']}`")
                 
-                # Menampilkan SN List yang sudah ada
-                if current_sn_list:
-                    st.markdown("##### 🔍 Daftar SN Tercatat (Jangan diubah di sini):")
-                    # Menggabungkan SN yang sudah ada menjadi string untuk ditampilkan
-                    sn_display = "\n".join(current_sn_list)
+                # Tombol untuk melihat SN list
+                if qty_fisik > 0:
+                    st.markdown("##### SN List yang sudah tercatat:")
+                    sn_display = "\n".join(row.get('sn_list', []))
                     st.code(sn_display, language='text')
-                    st.caption(f"Total SN saat ini: {qty_fisik}")
-                else:
-                    st.info("Belum ada Serial Number tercatat.")
-                    
-                st.divider()
 
-                # --- Input Batch ---
-                st.markdown("##### 📝 Scan/Input SN Batch (Satu SN per Baris)")
-                
-                col_in, col_jenis = st.columns([2, 1])
-
-                # Text area untuk menampung semua scan (SN dipisahkan oleh Enter/Baris Baru)
-                batch_input = col_in.text_area(
-                    "SN List (Scan semua SN di sini)", 
-                    key=f"batch_sn_input_{item_id}", 
-                    placeholder="Scan SN pertama...\nScan SN kedua...\n[Tekan Ctrl+Enter atau Tombol Simpan]",
-                    height=200
-                )
-                
-                # Tujuan Alokasi SN
-                new_jenis = col_jenis.radio(
-                    "Tujuan Alokasi (untuk SN yang akan di-submit)", 
-                    ['Stok', 'Display'], 
-                    index=['Stok', 'Display'].index(default_jenis), 
-                    key=f"jenis_sn_batch_{item_id}"
-                )
-                
-                keterangan_batch = st.text_area("Keterangan/Isu Tambahan", value="", key=notes_key, height=50)
-
-                # Tombol Simpan Batch
-                if st.button("💾 SIMPAN SN BATCH INI", key=f"btn_sn_batch_{item_id}", type="primary", use_container_width=True):
-                    
-                    # 1. Proses Input Batch
-                    submitted_sns = [s.strip() for s in batch_input.split('\n') if s.strip()]
-                    
-                    if not submitted_sns and not keterangan_batch:
-                         st.warning("Tidak ada SN baru atau keterangan yang dimasukkan.")
-                         st.stop()
-                         
-                    # 2. Gabungkan dengan SN Lama dan Hapus Duplikasi (Mempertahankan SN lama)
-                    final_sn_list = current_sn_list[:]
-                    new_count = 0
-                    
-                    for sn in submitted_sns:
-                        if sn not in final_sn_list:
-                            final_sn_list.append(sn)
-                            new_count += 1
-                        else:
-                            st.warning(f"SN `{sn}` sudah ada, dilewati.")
-                            
-                    # 3. Keterangan: Jika ada keterangan baru, timpa keterangan lama (untuk item Non-SN)
-                    keterangan_to_save = keterangan_batch if keterangan_batch.strip() else (row.get('keterangan') if row.get('keterangan') is not None else None)
-
-
-                    # 4. Simpan ke Database
-                    updates, conflict = handle_update_sn_list(row, final_sn_list, new_jenis, final_nama_user, loaded_time, keterangan_to_save)
-
-                    if not conflict and updates > 0:
-                        st.toast(f"✅ {new_count} SN baru ditambahkan! Total: {len(final_sn_list)}", icon="💾")
-                        st.session_state[f"batch_sn_input_{item_id}"] = "" # Clear input area
-                        time.sleep(0.5) 
-                        st.rerun()
-                    elif conflict:
-                         st.error("Gagal simpan SN. Mencoba perbaikan otomatis (cache clear)...")
-                         st.cache_resource.clear()
-                         st.rerun()
-                    elif not submitted_sns and updates == 0:
-                         st.info("Tidak ada SN baru yang dimasukkan untuk disimpan.")
-                        
-                # Tambahkan fitur penghapusan manual jika diperlukan
-                if current_sn_list:
-                    st.divider()
-                    st.markdown("##### 🗑️ Hapus SN (Manual)")
-                    
-                    # Dropdown untuk memilih SN yang ingin dihapus
-                    sn_to_remove = st.selectbox(
-                        "Pilih SN untuk Dihapus", 
-                        options=[""] + current_sn_list, 
-                        key=f"remove_select_{item_id}"
-                    )
-                    
-                    if sn_to_remove and st.button(f"HAPUS SN: {sn_to_remove}", key=f"btn_remove_{item_id}"):
-                        temp_sn_list = current_sn_list[:]
-                        temp_sn_list.remove(sn_to_remove)
-                        
-                        updates, conflict = handle_update_sn_list(row, temp_sn_list, default_jenis, final_nama_user, loaded_time, row.get('keterangan'))
-
-                        if not conflict and updates > 0:
-                            st.toast(f"❌ SN {sn_to_remove} dihapus.")
-                            st.rerun()
-                        elif conflict:
-                            st.error("Gagal menghapus SN. Mencoba perbaikan otomatis (cache clear)...")
-                            st.cache_resource.clear()
-                            st.rerun()
 
 # --- FUNGSI ADMIN ---
 def page_admin():
@@ -696,8 +701,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.13", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.13")
+    st.set_page_config(page_title="GR Validation v1.14", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.14")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
