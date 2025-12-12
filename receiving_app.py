@@ -158,7 +158,7 @@ def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     
     # --- END FIX V1.26 ---
     
-    with pd.ExcelWriter(output, engine='openypxl') as writer:
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_final.to_excel(writer, index=False, sheet_name=sheet_name)
         worksheet = writer.sheets[sheet_name]
         
@@ -556,12 +556,13 @@ def add_operator(store_name, operator_name, is_active=True):
 def delete_operator(operator_id):
     """Menghapus operator dari tabel store_operators"""
     try:
-        supabase.table(OPERATORS_TABLE).delete().eq("id", operator_id).execute()
+        # Menandai non-aktif (Soft delete)
+        supabase.table(OPERATORS_TABLE).update({"is_active": False}).eq("id", operator_id).execute()
         get_stores.clear() # Clear cache
         get_operators_by_store.clear() # Clear cache
-        return True, "Operator berhasil dihapus."
+        return True, "Operator berhasil dinonaktifkan."
     except Exception as e:
-        return False, f"Gagal menghapus operator: {str(e)}"
+        return False, f"Gagal menonaktifkan operator: {str(e)}"
 
 
 # --- HALAMAN CHECKER ---
