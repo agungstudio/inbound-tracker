@@ -53,7 +53,8 @@ def parse_supabase_timestamp(timestamp_str):
 def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openypyxl') as writer:
+    # FIX: Mengganti engine='openypyxl' menjadi engine='openpyxl'
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         cols = ['gr_number', 'sku', 'nama_barang', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'jenis', 'sn_list', 'updated_by', 'updated_at']
         
         df_export = df.copy()
