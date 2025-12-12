@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.25 - Enhanced Excel Styles] ---
+# --- KONFIGURASI [v1.26 - 1 SN Per Baris di Laporan] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -54,20 +54,81 @@ def parse_supabase_timestamp(timestamp_str):
 def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
+    
+    # --- START FIX V1.26: Konversi 1 SKU per baris menjadi 1 SN per baris ---
+    
+    df_sn = df[df['kategori_barang'] == 'SN'].copy()
+    df_non_sn = df[df['kategori_barang'] == 'NON-SN'].copy()
+    
+    # 1. Proses Data SN (Unpivot)
+    rows_list = []
+    
+    for index, row in df_sn.iterrows():
+        sn_list = row.get('sn_list', [])
+        
+        # Jika Qty PO > 0 tetapi SN belum tercatat, masukkan satu baris placeholder
+        if not sn_list and row['qty_po'] > 0:
+             # Placeholder untuk item yang SHORT/Belum Dicek
+             new_row = row.drop('sn_list').to_dict()
+             new_row['Serial Number'] = 'BELUM DICATAT/SHORT'
+             new_row['Qty Fisik Unit'] = 0
+             rows_list.append(new_row)
+        
+        # Masukkan setiap SN sebagai baris baru
+        for sn in sn_list:
+            new_row = row.drop('sn_list').to_dict()
+            new_row['Serial Number'] = sn
+            new_row['Qty Fisik Unit'] = 1 # Qty per unit SN selalu 1
+            rows_list.append(new_row)
+            
+    df_sn_processed = pd.DataFrame(rows_list)
+    
+    # 2. Proses Data Non-SN (Tetap)
+    if not df_non_sn.empty:
+        df_non_sn['Serial Number'] = 'N/A'
+        df_non_sn['Qty Fisik Unit'] = df_non_sn['qty_fisik']
+        
+    # 3. Gabungkan Semua
+    final_cols_order = [
+        'gr_number', 'kategori_barang', 'sku', 'nama_barang', 'qty_po', 'Qty Fisik Unit', 
+        'Serial Number', 'jenis', 'is_inbound', 'keterangan', 'updated_by', 'updated_at'
+    ]
+    
+    # Rename untuk header Excel yang lebih baik
+    column_mapping = {
+        'gr_number': 'Dokumen GR/PO',
+        'kategori_barang': 'Tipe',
+        'sku': 'SKU',
+        'nama_barang': 'BRAND',
+        'qty_po': 'Qty PO',
+        'Serial Number': 'Serial Number/SN',
+        'jenis': 'Alokasi',
+        'is_inbound': 'Status Inbound',
+        'keterangan': 'Keterangan',
+        'updated_by': 'Checker/Admin',
+        'updated_at': 'Waktu Update'
+    }
+    
+    if df_sn_processed.empty:
+        df_final = df_non_sn
+    elif df_non_sn.empty:
+        df_final = df_sn_processed
+    else:
+        df_final = pd.concat([df_sn_processed, df_non_sn], ignore_index=True)
+        
+    if df_final.empty:
+        return output.getvalue() # return empty excel
+        
+    df_final = df_final[final_cols_order]
+    df_final = df_final.rename(columns=column_mapping)
+    
+    # Atur Status Inbound
+    df_final['Status Inbound'] = df_final['Status Inbound'].apply(lambda x: 'OK' if x else 'PENDING')
+    
+    # --- END FIX V1.26 ---
+    
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # FIX V1.23: Tambah kolom is_inbound
-        cols = ['gr_number', 'sku', 'nama_barang', 'qty_po', 'qty_fisik', 'qty_diff', 'keterangan', 'jenis', 'is_inbound', 'sn_list', 'updated_by', 'updated_at']
-        
-        df_export = df.copy()
-        if 'sn_list' in df_export.columns:
-             df_export['sn_list'] = df_export['sn_list'].apply(lambda x: "; ".join(x) if isinstance(x, list) else (x if pd.notna(x) else ''))
-        
-        df_export['qty_diff'] = df_export['qty_fisik'] - df_export['qty_po']
-        
-        available_cols = [c for c in cols if c in df_export.columns]
-        df_export = df_export[available_cols] if not df_export.empty else df_export
-        
-        df_export.to_excel(writer, index=False, sheet_name=sheet_name)
+        df_final.to_excel(writer, index=False, sheet_name=sheet_name)
         worksheet = writer.sheets[sheet_name]
         
         # FIX V1.25: Gaya header yang lebih menarik
@@ -1028,9 +1089,13 @@ def page_admin():
             if selected_inbound_item != "-- Pilih Item --":
                 # Mendapatkan ID dari baris yang dipilih
                 try:
+                    # Mencari ID berdasarkan GR dan SKU
+                    gr_number_selected = selected_inbound_item.split(' | ')[0].strip()
+                    sku_selected = selected_inbound_item.split('SKU: ')[1].strip()
+                    
                     item_details = df_inbound_pending[
-                        (df_inbound_pending['gr_number'] == selected_inbound_item.split(' | ')[0].strip()) &
-                        (df_inbound_pending['sku'] == selected_inbound_item.split('SKU: ')[1].strip())
+                        (df_inbound_pending['gr_number'] == gr_number_selected) &
+                        (df_inbound_pending['sku'] == sku_selected)
                     ].iloc[0]
                 except IndexError:
                     st.error("Gagal menemukan detail item. Muat ulang data.")
@@ -1066,9 +1131,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.25", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.26", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.25")
+    st.sidebar.title("GR Validation Apps v1.26")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
