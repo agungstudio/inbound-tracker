@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.16 - Blind Receive] ---
+# --- KONFIGURASI [v1.18 - Blind Receive SN/NON-SN] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -343,24 +343,35 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
         
     return 0, False # No change
 
-def handle_blind_insert(sku, nama_barang, qty, jenis, keterangan, nama_user):
+def handle_blind_insert(brand, sku, qty, sn_list, tipe_barang, jenis, keterangan, nama_user):
     """Menangani INSERT barang tanpa dokumen (Blind Receive)"""
-    try:
-        if not sku or not nama_barang or qty <= 0:
-            return False, "SKU, Nama Barang, dan Qty harus diisi."
+    
+    if not brand or not sku or not keterangan.strip():
+        return False, "Brand, SKU, dan Keterangan wajib diisi."
+        
+    if tipe_barang == 'SN':
+        if not sn_list: return False, "Untuk barang SN, Serial Number wajib diisi."
+        final_qty = len(sn_list)
+        final_sn_list = sn_list
+    else:
+        if qty <= 0: return False, "Quantity Fisik harus lebih dari 0."
+        final_qty = qty
+        final_sn_list = None # DB expects None for NON-SN sn_list
 
-        # Payload untuk Blind Receive
+    try:
+        # Payload mapping user input to DB columns
         payload = {
-            "sku": sku.strip(),
-            "nama_barang": nama_barang.strip(),
-            "kategori_barang": 'NON-SN', # Default NON-SN untuk simplicity
-            "qty_po": 0, # PO Qty selalu 0 untuk item Blind Receive
-            "qty_fisik": qty,
+            "sku": sku.strip(),          # User's input for SKU goes to DB SKU
+            "nama_barang": brand.strip(), # User's input for Brand goes to DB Nama Barang
+            "kategori_barang": tipe_barang, 
+            "qty_po": 0, 
+            "qty_fisik": final_qty,
             "jenis": jenis,
             "keterangan": f"BLIND RECEIVE ({nama_user}): {keterangan}",
             "updated_by": nama_user,
             "is_active": True,
-            "gr_number": "BLIND-RECEIVE" # Flag khusus
+            "gr_number": "BLIND-RECEIVE",
+            "sn_list": json.dumps(final_sn_list) if final_sn_list is not None else None
         }
         
         supabase.table(RECEIVING_TABLE).insert(payload).execute()
@@ -420,7 +431,6 @@ def page_checker():
     
     if df.empty:
         st.info(f"Tidak ada data barang yang valid untuk GR **{active_gr}**.")
-        # Lanjut menampilkan form Blind Receive meskipun GR Master kosong
     
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
@@ -441,211 +451,262 @@ def page_checker():
     st.markdown("---")
     
     # =========================================================================
-    # BLIND RECEIVE / AD HOC FORM (New Section)
+    # TAB NAVIGATION
     # =========================================================================
-    st.subheader("👻 Registrasi Barang Tanpa Dokumen (Blind Receive)")
-    with st.expander("Klik untuk Registrasi Barang Ad Hoc (Non-SN)", expanded=False):
-        with st.form("blind_receive_form", clear_on_submit=True):
-            st.caption("Gunakan ini HANYA untuk barang Non-SN yang tidak ada di Master GR/PO.")
+    tab_sn, tab_non_sn, tab_adhoc, tab_status = st.tabs([
+        "⚡ Pindai SN Cepat", 
+        "📦 Input Qty Non-SN", 
+        "👻 Tambah Ad Hoc", 
+        "📋 Status & Review"
+    ])
+    
+    # -------------------------------------------------------------------------
+    # TAB 1: Pindai SN Cepat (Global SN Scanner)
+    # -------------------------------------------------------------------------
+    with tab_sn:
+        if not df_sn.empty:
+            st.subheader("⚡ Pemindaian Global Serial Number (Scan Cepat)")
             
-            col_sku, col_nama, col_qty = st.columns([1.5, 2, 1])
-            blind_sku = col_sku.text_input("SKU Barang", placeholder="Wajib diisi")
-            blind_nama = col_nama.text_input("Nama Barang", placeholder="Wajib diisi")
-            blind_qty = col_qty.number_input("Jumlah Fisik Diterima", min_value=1, step=1)
+            # Pilihan untuk Selectbox: SKU - Nama Barang (ID)
+            sn_select_options = ["-- Pilih Barang SN yang Sedang Anda Scan --"] + [
+                f"{row['sku']} - {row['nama_barang']} (PO: {row['qty_po']} | Tercatat: {len(row['sn_list'])}) (ID: {row['id'][:4]}...)" 
+                for _, row in df_sn.iterrows()
+            ]
             
-            col_jenis_desc, col_keterangan = st.columns([1, 2])
-            blind_jenis = col_jenis_desc.radio("Tujuan Alokasi", ['Stok', 'Display'], index=0)
-            blind_keterangan = col_keterangan.text_area("Keterangan Tambahan (Wajib)", height=50)
-
-            if st.form_submit_button("➕ REGISTRASI BLIND RECEIVE (INSERT BARU)", type="secondary", use_container_width=True):
-                if not blind_sku or not blind_nama or blind_qty <= 0 or not blind_keterangan.strip():
-                    st.error("Semua field (SKU, Nama, Qty, Keterangan) wajib diisi untuk Blind Receive.")
-                else:
-                    success, msg = handle_blind_insert(
-                        blind_sku, blind_nama, blind_qty, blind_jenis, blind_keterangan, final_nama_user
-                    )
-                    if success:
-                        st.success(f"✅ Registrasi Blind Receive berhasil! Item: {blind_nama}")
-                        time.sleep(1)
-                        st.rerun()
-
-    st.divider()
-
-    # =========================================================================
-    # GLOBAL SN SCANNER FORM 
-    # =========================================================================
-    if not df_sn.empty:
-        
-        st.subheader("⚡ Pemindaian Global SN (Scan Cepat)")
-        
-        # Pilihan untuk Selectbox: SKU - Nama Barang (ID)
-        sn_select_options = ["-- Pilih Barang SN yang Discan --"] + [
-            f"{row['sku']} - {row['nama_barang']} (PO: {row['qty_po']} | Tercatat: {len(row['sn_list'])}) (ID: {row['id'][:4]}...)" 
-            for _, row in df_sn.iterrows()
-        ]
-        
-        with st.form("global_sn_form", clear_on_submit=True):
-            
-            col_sku, col_jenis = st.columns([2, 1])
-            
-            selected_item_str = col_sku.selectbox(
-                "Pilih Barang SN yang Sedang Anda Scan", 
-                options=sn_select_options,
-                key="global_sn_selector"
-            )
-
-            # Cari ID barang yang dipilih
-            selected_id = None
-            selected_row = None
-            if "ID:" in selected_item_str:
-                item_id_part = selected_item_str.split('(ID: ')[1].strip(')')
-                selected_id_prefix = item_id_part.split('...')[0]
-                selected_row_match = df_sn[df_sn['id'].str.startswith(selected_id_prefix)]
-                if not selected_row_match.empty:
-                    selected_row = selected_row_match.iloc[0].to_dict()
+            with st.form("global_sn_form", clear_on_submit=True):
                 
-            # Menggunakan jenis barang saat ini sebagai default radio
-            current_jenis = selected_row.get('jenis', 'Stok') if selected_row else 'Stok'
-            new_jenis = col_jenis.radio(
-                "Tujuan Alokasi SN", 
-                ['Stok', 'Display'], 
-                index=['Stok', 'Display'].index(current_jenis),
-            )
-            
-            st.markdown("##### 📝 Scan SN di Bawah (Satu SN per Baris)")
-            batch_input = st.text_area(
-                "Scan SN List", 
-                placeholder="Scan SN pertama...\nScan SN kedua...\n[Tekan Ctrl+Enter atau Tombol Simpan]",
-                height=250
-            )
-
-            if st.form_submit_button("💾 SUBMIT & SIMPAN SN BATCH", type="primary", use_container_width=True):
+                col_sku, col_jenis = st.columns([2, 1])
                 
-                if not selected_row:
-                    st.error("Pilih Barang SN yang valid terlebih dahulu.")
-                    st.stop()
-                    
-                submitted_sns = [s.strip() for s in batch_input.split('\n') if s.strip()]
-                
-                if not submitted_sns:
-                    st.warning("Tidak ada Serial Number yang dimasukkan.")
-                    st.stop()
-                
-                # Pemrosesan Batch
-                current_sn_list = selected_row.get('sn_list', [])
-                final_sn_list = current_sn_list[:]
-                new_count = 0
-                
-                for sn in submitted_sns:
-                    if sn not in final_sn_list:
-                        final_sn_list.append(sn)
-                        new_count += 1
-                    else:
-                        st.warning(f"SN `{sn}` sudah ada di list sebelumnya, dilewati.")
-                
-                # Keterangan diabaikan untuk Global Scan, hanya fokus pada SN/Jenis
-                updates, conflict = handle_update_sn_list(
-                    selected_row, final_sn_list, new_jenis, final_nama_user, loaded_time, 
-                    selected_row.get('keterangan')
+                selected_item_str = col_sku.selectbox(
+                    "Pilih Barang SN yang Sedang Anda Scan", 
+                    options=sn_select_options,
+                    key="global_sn_selector"
                 )
 
-                if not conflict and updates > 0:
-                    st.success(f"✅ {new_count} SN baru ditambahkan untuk **{selected_row['nama_barang']}**! Total: {len(final_sn_list)}")
-                    time.sleep(1) 
-                    st.rerun() 
-                elif conflict:
-                     st.error("Gagal simpan SN. Mencoba perbaikan otomatis (cache clear)...")
-                     st.cache_resource.clear()
-                     st.rerun()
-
-        st.divider()
-
-    # =========================================================================
-    # [1] LIST BARANG NON-SN 
-    # =========================================================================
-    if not df_non.empty:
-        st.subheader(f"📦 Non-SN ({len(df_non)})")
-
-        for index, row in df_non.iterrows():
-            item_id = row['id']
-            qty_po = row['qty_po']
-            default_qty = row['qty_fisik']
-            default_jenis = row['jenis']
-            selisih_po = default_qty - qty_po
-            
-            status_text = "MATCH" if selisih_po == 0 else ("OVER" if selisih_po > 0 else "SHORT")
-            status_color = "green" if selisih_po == 0 else "red"
-            
-            header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | Selisih: :{status_color}[{selisih_po}]"
-            
-            notes_key = f"notes_non_{item_id}"
-            current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
-            
-            # Card Non-SN (sembunyi default)
-            with st.expander(header_text, expanded=False):
-                col_info, col_input = st.columns([1.5, 1.5])
-                
-                with col_info:
-                    st.markdown(f"**SKU:** {row['sku']}")
-                    st.markdown(f"**Qty PO (Harapan):** `{qty_po}`")
-                    st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
-                    if current_notes: st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
-                
-                with col_input:
-                    new_qty = st.number_input("JML FISIK DITERIMA", value=default_qty, min_value=0, step=1, key=f"qty_non_{item_id}")
+                # Cari ID barang yang dipilih
+                selected_row = None
+                if "ID:" in selected_item_str:
+                    item_id_part = selected_item_str.split('(ID: ')[1].strip(')')
+                    selected_id_prefix = item_id_part.split('...')[0]
+                    selected_row_match = df_sn[df_sn['id'].str.startswith(selected_id_prefix)]
+                    if not selected_row_match.empty:
+                        selected_row = selected_row_match.iloc[0].to_dict()
                     
-                    new_jenis = st.radio("Tujuan Alokasi", ['Stok', 'Display'], index=['Stok', 'Display'].index(default_jenis), horizontal=True, key=f"jenis_non_{item_id}")
-                    
-                    keterangan = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
+                # Menggunakan jenis barang saat ini sebagai default radio
+                current_jenis = selected_row.get('jenis', 'Stok') if selected_row else 'Stok'
+                new_jenis = col_jenis.radio(
+                    "Tujuan Alokasi SN", 
+                    ['Stok', 'Display'], 
+                    index=['Stok', 'Display'].index(current_jenis),
+                )
+                
+                st.markdown("##### 📝 Scan SN di Bawah (Satu SN per Baris)")
+                batch_input = st.text_area(
+                    "Scan SN List", 
+                    placeholder="Scan SN pertama...\nScan SN kedua...\n[Tekan Ctrl+Enter atau Tombol Simpan]",
+                    height=250
+                )
 
-                    if st.button("Simpan Non-SN", key=f"btn_non_{item_id}", type="primary", use_container_width=True):
-                        updates, conflict = handle_update_non_sn(row, new_qty, new_jenis, final_nama_user, loaded_time, keterangan.strip())
+                if st.form_submit_button("💾 SUBMIT & SIMPAN SN BATCH", type="primary", use_container_width=True):
+                    
+                    if not selected_row:
+                        st.error("Pilih Barang SN yang valid terlebih dahulu.")
+                        st.stop()
                         
-                        if not conflict and updates > 0:
-                            st.toast(f"✅ Qty {row['nama_barang']} ({new_jenis}) disimpan!", icon="💾")
-                            time.sleep(0.5)
-                            st.rerun()
-                        elif not conflict:
-                            st.info("Tidak ada perubahan yang tersimpan.")
-                        elif conflict:
-                             st.error("Gagal simpan Non-SN. Mencoba perbaikan otomatis (cache clear)...")
-                             st.cache_resource.clear()
-                             st.rerun()
-                            
-    st.markdown("---")
+                    submitted_sns = [s.strip() for s in batch_input.split('\n') if s.strip()]
+                    
+                    if not submitted_sns:
+                        st.warning("Tidak ada Serial Number yang dimasukkan.")
+                        st.stop()
+                    
+                    # Pemrosesan Batch
+                    current_sn_list = selected_row.get('sn_list', [])
+                    final_sn_list = current_sn_list[:]
+                    new_count = 0
+                    
+                    for sn in submitted_sns:
+                        if sn not in final_sn_list:
+                            final_sn_list.append(sn)
+                            new_count += 1
+                        else:
+                            st.warning(f"SN `{sn}` sudah ada di list sebelumnya, dilewati.")
+                    
+                    # Keterangan diabaikan untuk Global Scan, hanya fokus pada SN/Jenis
+                    updates, conflict = handle_update_sn_list(
+                        selected_row, final_sn_list, new_jenis, final_nama_user, loaded_time, 
+                        selected_row.get('keterangan')
+                    )
 
-    # =========================================================================
-    # [2] STATUS BARANG SN (DISPLAY ONLY)
-    # Ditempatkan di bawah Non-SN untuk review akhir.
-    # =========================================================================
-    if not df_sn.empty:
+                    if not conflict and updates > 0:
+                        st.success(f"✅ {new_count} SN baru ditambahkan untuk **{selected_row['nama_barang']}**! Total: {len(final_sn_list)}")
+                        time.sleep(1) 
+                        st.rerun() 
+                    elif conflict:
+                         st.error("Gagal simpan SN. Mencoba perbaikan otomatis (cache clear)...")
+                         st.cache_resource.clear()
+                         st.rerun()
+        else:
+            st.info("Tidak ada item SN yang aktif dalam sesi ini.")
+
+    # -------------------------------------------------------------------------
+    # TAB 2: Input Qty Non-SN
+    # -------------------------------------------------------------------------
+    with tab_non_sn:
+        if not df_non.empty:
+            st.subheader(f"📦 Non-SN ({len(df_non)}) - Input Kuantitas")
+
+            for index, row in df_non.iterrows():
+                item_id = row['id']
+                qty_po = row['qty_po']
+                default_qty = row['qty_fisik']
+                default_jenis = row['jenis']
+                selisih_po = default_qty - qty_po
+                
+                status_text = "MATCH" if selisih_po == 0 else ("OVER" if selisih_po > 0 else "SHORT")
+                status_color = "green" if selisih_po == 0 else "red"
+                
+                header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | Selisih: :{status_color}[{selisih_po}]"
+                
+                notes_key = f"notes_non_{item_id}"
+                current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
+                
+                # Card Non-SN (sembunyi default)
+                with st.expander(header_text, expanded=False):
+                    col_info, col_input = st.columns([1.5, 1.5])
+                    
+                    with col_info:
+                        st.markdown(f"**SKU:** {row['sku']}")
+                        st.markdown(f"**Qty PO (Harapan):** `{qty_po}`")
+                        st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
+                        if current_notes: st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
+                    
+                    with col_input:
+                        new_qty = st.number_input("JML FISIK DITERIMA", value=default_qty, min_value=0, step=1, key=f"qty_non_{item_id}")
+                        
+                        new_jenis = st.radio("Tujuan Alokasi", ['Stok', 'Display'], index=['Stok', 'Display'].index(default_jenis), horizontal=True, key=f"jenis_non_{item_id}")
+                        
+                        keterangan = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
+
+                        if st.button("Simpan Non-SN", key=f"btn_non_{item_id}", type="primary", use_container_width=True):
+                            updates, conflict = handle_update_non_sn(row, new_qty, new_jenis, final_nama_user, loaded_time, keterangan.strip())
+                            
+                            if not conflict and updates > 0:
+                                st.toast(f"✅ Qty {row['nama_barang']} ({new_jenis}) disimpan!", icon="💾")
+                                time.sleep(0.5)
+                                st.rerun()
+                            elif not conflict:
+                                st.info("Tidak ada perubahan yang tersimpan.")
+                            elif conflict:
+                                st.error("Gagal simpan Non-SN. Mencoba perbaikan otomatis (cache clear)...")
+                                st.cache_resource.clear()
+                                st.rerun()
+        else:
+            st.info("Tidak ada item Non-SN yang aktif dalam sesi ini.")
+
+    # -------------------------------------------------------------------------
+    # TAB 3: Tambah Ad Hoc (Blind Receive) - New Structure
+    # -------------------------------------------------------------------------
+    with tab_adhoc:
+        st.subheader("👻 Registrasi Barang Tanpa Dokumen (Blind Receive)")
+        st.warning("Gunakan fitur ini dengan bijak, karena akan mencatat item yang TIDAK ADA di dokumen GR/PO.")
+        
+        with st.form("blind_receive_form", clear_on_submit=True):
+            
+            # --- Input Tipe & Alokasi ---
+            col_brand, col_sku = st.columns(2)
+            blind_brand = col_brand.text_input("Brand", placeholder="Contoh: Samsung/Vivan/Robot")
+            blind_sku = col_sku.text_input("SKU Barang", placeholder="Contoh: S24-ULT-512")
+            
+            col_tipe, col_jenis = st.columns(2)
+            blind_tipe = col_tipe.radio("Tipe Barang", ['NON-SN', 'SN'], index=0, horizontal=True)
+            blind_jenis = col_jenis.radio("Tujuan Alokasi", ['Stok', 'Display'], index=0, horizontal=True)
+            
+            st.markdown("---")
+            
+            # --- Conditional Input ---
+            blind_qty = 0
+            blind_sn_list = None
+            
+            if blind_tipe == 'NON-SN':
+                blind_qty = st.number_input("Quantity Fisik Diterima", min_value=1, step=1)
+                st.caption("Karena Non-SN, Qty dimasukkan manual.")
+            else:
+                blind_sn_input = st.text_area(
+                    "Scan SN List (Satu SN per Baris)", 
+                    height=150, 
+                    placeholder="Scan SN pertama...\nScan SN kedua..."
+                )
+                blind_sn_list = [s.strip() for s in blind_sn_input.split('\n') if s.strip()]
+                if blind_sn_list:
+                    st.info(f"Total SN yang discan: **{len(blind_sn_list)}**")
+            
+            st.markdown("---")
+            blind_keterangan = st.text_area("Keterangan Tambahan (Wajib)", height=50)
+
+            if st.form_submit_button("➕ REGISTRASI BLIND RECEIVE (INSERT BARU)", type="secondary", use_container_width=True):
+                
+                # Check umum
+                if not blind_brand or not blind_sku or not blind_keterangan.strip():
+                    st.error("Brand, SKU, dan Keterangan wajib diisi.")
+                    st.stop()
+                    
+                success, msg = handle_blind_insert(
+                    blind_brand, blind_sku, blind_qty, blind_sn_list, blind_tipe, blind_jenis, blind_keterangan, final_nama_user
+                )
+                
+                if success:
+                    st.success(f"✅ Registrasi Blind Receive berhasil! Item: {blind_brand} ({blind_sku})")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(f"Gagal Registrasi: {msg}")
+
+
+    # -------------------------------------------------------------------------
+    # TAB 4: Status & Review (Display Only)
+    # -------------------------------------------------------------------------
+    with tab_status:
         st.subheader(f"📋 Status Barang SN ({len(df_sn)})")
 
-        for index, row in df_sn.iterrows():
-            item_id = row['id']
-            qty_po = row['qty_po']
-            qty_fisik = len(row.get('sn_list', []))
-            default_jenis = row['jenis']
-            selisih_po = qty_fisik - qty_po
-            
-            status_text = "MATCH" if selisih_po == 0 else ("OVER" if selisih_po > 0 else "SHORT")
-            status_color = "green" if selisih_po == 0 else "red"
-            
-            header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}] | Alokasi: {default_jenis}"
-            
-            # Card Status SN (sembunyi default)
-            with st.expander(header_text, expanded=False):
-                st.markdown(f"**SKU:** {row['sku']}")
-                st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
-                if row.get('keterangan'): st.markdown(f"**Catatan:** `{row['keterangan']}`")
+        if not df_sn.empty:
+            for index, row in df_sn.iterrows():
+                item_id = row['id']
+                qty_po = row['qty_po']
+                qty_fisik = len(row.get('sn_list', []))
+                default_jenis = row['jenis']
+                selisih_po = qty_fisik - qty_po
                 
-                # Tombol untuk melihat SN list
-                if qty_fisik > 0:
-                    st.markdown("##### SN List yang sudah tercatat:")
-                    sn_display = "\n".join(row.get('sn_list', []))
-                    st.code(sn_display, language='text')
+                status_text = "MATCH" if selisih_po == 0 else ("OVER" if selisih_po > 0 else "SHORT")
+                status_color = "green" if selisih_po == 0 else "red"
+                
+                header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}] | Alokasi: {default_jenis}"
+                
+                # Card Status SN (sembunyi default)
+                with st.expander(header_text, expanded=False):
+                    st.markdown(f"**SKU:** {row['sku']}")
+                    st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
+                    if row.get('keterangan'): st.markdown(f"**Catatan:** `{row['keterangan']}`")
+                    
+                    # Tombol untuk melihat SN list
+                    if qty_fisik > 0:
+                        st.markdown("##### SN List yang sudah tercatat:")
+                        sn_display = "\n".join(row.get('sn_list', []))
+                        st.code(sn_display, language='text')
+        else:
+             st.info("Tidak ada item SN dalam sesi ini.")
 
-
+        st.markdown("---")
+        
+        if not df_non.empty:
+            st.subheader(f"📦 Status Barang Non-SN ({len(df_non)})")
+            
+            # Menampilkan Non-SN dalam bentuk tabel sederhana untuk review
+            df_review = df_non[['sku', 'nama_barang', 'qty_po', 'qty_fisik', 'jenis', 'updated_by', 'keterangan']].copy()
+            df_review['Selisih'] = df_review['qty_fisik'] - df_review['qty_po']
+            st.dataframe(df_review, use_container_width=True)
+        else:
+            st.info("Tidak ada item Non-SN dalam sesi ini.")
+            
 # --- FUNGSI ADMIN ---
 def page_admin():
     st.title("🛡️ Admin Dashboard (Receiving)")
@@ -765,8 +826,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.15", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.15")
+    st.set_page_config(page_title="GR Validation v1.18", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.18")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
