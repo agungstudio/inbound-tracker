@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.14 - Global SN Scanner] ---
+# --- KONFIGURASI [v1.15 - Confirmed Ideal Layout] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -26,7 +26,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     st.markdown("**(Pastikan `SUPABASE_KEY` adalah SERVICE ROLE KEY/MASTER KEY untuk bypass RLS)**")
     st.stop()
 
-# FIX v1.8: Memaksa Streamlit me-rehash koneksi dengan Supabase
+# Memaksa Streamlit me-rehash koneksi dengan Supabase
 @st.cache_resource(hash_funcs={type(st.secrets): lambda x: (x.get("SUPABASE_URL"), x.get("SUPABASE_KEY"))})
 def init_connection():
     try:
@@ -410,6 +410,7 @@ def page_checker():
     
     # =========================================================================
     # GLOBAL SN SCANNER FORM (NEW METHOD)
+    # Global Scanner diletakkan di atas agar mudah dijangkau saat scanning.
     # =========================================================================
     if not df_sn.empty:
         
@@ -420,7 +421,7 @@ def page_checker():
         
         # Pilihan untuk Selectbox: SKU - Nama Barang (ID)
         sn_select_options = ["-- Pilih Barang SN yang Discan --"] + [
-            f"{row['sku']} - {row['nama_barang']} (ID: {row['id'][:4]}...)" 
+            f"{row['sku']} - {row['nama_barang']} (PO: {row['qty_po']} | Tercatat: {len(row['sn_list'])}) (ID: {row['id'][:4]}...)" 
             for _, row in df_sn.iterrows()
         ]
         
@@ -438,10 +439,12 @@ def page_checker():
             selected_id = None
             selected_row = None
             if "ID:" in selected_item_str:
+                # Perubahan untuk mengatasi format ID yang baru
                 item_id_part = selected_item_str.split('(ID: ')[1].strip(')')
-                selected_id = item_id_part.split('...')[0]
-                selected_row_match = df_sn[df_sn['id'].str.startswith(selected_id)].iloc[0]
-                selected_row = selected_row_match.to_dict()
+                selected_id_prefix = item_id_part.split('...')[0]
+                selected_row_match = df_sn[df_sn['id'].str.startswith(selected_id_prefix)]
+                if not selected_row_match.empty:
+                    selected_row = selected_row_match.iloc[0].to_dict()
                 
             # Menggunakan jenis barang saat ini sebagai default radio
             current_jenis = selected_row.get('jenis', 'Stok') if selected_row else 'Stok'
@@ -501,6 +504,7 @@ def page_checker():
 
     # =========================================================================
     # [1] LIST BARANG NON-SN (TIDAK BERUBAH)
+    # Card sembunyi by default
     # =========================================================================
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)})")
@@ -520,6 +524,7 @@ def page_checker():
             notes_key = f"notes_non_{item_id}"
             current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
             
+            # Card Non-SN (sembunyi default)
             with st.expander(header_text, expanded=False):
                 col_info, col_input = st.columns([1.5, 1.5])
                 
@@ -553,7 +558,9 @@ def page_checker():
     st.markdown("---")
 
     # =========================================================================
-    # [2] LIST BARANG SN (DISPLAY ONLY)
+    # [2] STATUS BARANG SN (DISPLAY ONLY)
+    # Ditempatkan di bawah Non-SN untuk review akhir.
+    # Card sembunyi by default
     # =========================================================================
     if not df_sn.empty:
         st.subheader(f"📋 Status Barang SN ({len(df_sn)})")
@@ -570,6 +577,7 @@ def page_checker():
             
             header_text = f"**{row['nama_barang']}** (PO: {qty_po}) | Tercatat: {qty_fisik} | Selisih: :{status_color}[{selisih_po}] | Alokasi: {default_jenis}"
             
+            # Card Status SN (sembunyi default)
             with st.expander(header_text, expanded=False):
                 st.markdown(f"**SKU:** {row['sku']}")
                 st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
@@ -701,8 +709,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.14", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.14")
+    st.set_page_config(page_title="GR Validation v1.15", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.15")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
