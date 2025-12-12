@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.19 - Multi-GR Session Support] ---
+# --- KONFIGURASI [v1.20 - Blind Receive Reactivity Fix] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -652,26 +652,27 @@ def page_checker():
         st.subheader("👻 Registrasi Barang Tanpa Dokumen (Blind Receive)")
         st.warning("Gunakan fitur ini dengan bijak, karena akan mencatat item yang TIDAK ADA di dokumen GR/PO.")
         
+        # --- FIX V1.20: Tipe Barang dan Tujuan di luar form untuk reaktivitas ---
+        col_tipe, col_jenis = st.columns(2)
+        blind_tipe = col_tipe.radio("Tipe Barang", ['NON-SN', 'SN'], index=0, horizontal=True, key="blind_tipe_radio")
+        blind_jenis = col_jenis.radio("Tujuan Alokasi", ['Stok', 'Display'], index=0, horizontal=True, key="blind_jenis_radio")
+
         with st.form("blind_receive_form", clear_on_submit=True):
             
-            # --- Input Tipe & Alokasi ---
+            # Input Brand dan SKU
             col_brand, col_sku = st.columns(2)
             blind_brand = col_brand.text_input("Brand", placeholder="Contoh: Samsung/Vivan/Robot")
             blind_sku = col_sku.text_input("SKU Barang", placeholder="Contoh: S24-ULT-512")
             
-            col_tipe, col_jenis = st.columns(2)
-            blind_tipe = col_tipe.radio("Tipe Barang", ['NON-SN', 'SN'], index=0, horizontal=True)
-            blind_jenis = col_jenis.radio("Tujuan Alokasi", ['Stok', 'Display'], index=0, horizontal=True)
-            
             st.markdown("---")
             
-            # --- Conditional Input ---
+            # --- Conditional Input (Digerakkan oleh blind_tipe di luar form) ---
             blind_qty = 0
             blind_sn_list = None
             
             if blind_tipe == 'NON-SN':
                 blind_qty = st.number_input("Quantity Fisik Diterima", min_value=1, step=1)
-                st.caption("Karena Non-SN, Qty dimasukkan manual.")
+                st.caption("Item akan di-insert sebagai 1 baris data Non-SN.")
             else:
                 blind_sn_input = st.text_area(
                     "Scan SN List (Satu SN per Baris)", 
@@ -680,7 +681,7 @@ def page_checker():
                 )
                 blind_sn_list = [s.strip() for s in blind_sn_input.split('\n') if s.strip()]
                 if blind_sn_list:
-                    st.info(f"Total SN yang discan: **{len(blind_sn_list)}**")
+                    st.info(f"Total SN yang discan: **{len(blind_sn_list)}** (Ini akan menjadi Qty Fisik)")
             
             st.markdown("---")
             blind_keterangan = st.text_area("Keterangan Tambahan (Wajib)", height=50)
@@ -881,9 +882,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.19", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.20", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.19")
+    st.sidebar.title("GR Validation Apps v1.20")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
