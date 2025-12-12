@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.20 - Blind Receive Reactivity Fix] ---
+# --- KONFIGURASI [v1.21 - Final GR Filtering Fix] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -101,16 +101,13 @@ def get_data(gr_number=None, search_term=None, only_active=True):
     """Mengambil data GR untuk dicek, berdasarkan GR number yang dipilih"""
     query = supabase.table(RECEIVING_TABLE).select("*")
     
-    if gr_number and gr_number != "BLIND-RECEIVE":
+    # FIX V1.21: Filter GR Number selalu diterapkan jika ada
+    if gr_number:
         query = query.eq("gr_number", gr_number)
     
+    # Filter Status Aktif selalu diterapkan jika diminta
     if only_active: 
-        # Jika GR number spesifik, filter by GR number. Jika tidak ada GR number (global load), filter by is_active=True
-        if not gr_number:
-            query = query.eq("is_active", True)
-        # Jika gr_number adalah BLIND-RECEIVE, kita tidak perlu filter is_active
-        if gr_number != "BLIND-RECEIVE":
-             query = query.eq("is_active", True)
+        query = query.eq("is_active", True)
 
     
     start_time = datetime.now(timezone.utc)
@@ -882,9 +879,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.20", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.21", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.20")
+    st.sidebar.title("GR Validation Apps v1.21")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
