@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.9 - Master Key Method] ---
+# --- KONFIGURASI [v1.10 - Force Cache Clear] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -566,7 +566,7 @@ def page_admin():
     else:
         st.info(f"📅 Sesi Aktif: **{active_gr}**")
     
-    tab1, tab2, tab3 = st.tabs(["🚀 Mulai Sesi GR", "🗄️ Laporan & Arsip", "⚠️ Danger Zone"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Mulai Sesi GR", "🗄️ Laporan & Arsip", "⚠️ Danger Zone", "🔧 Maintenance"])
     
     with tab1:
         st.markdown("### 1️⃣ Download Template Master GR/PO")
@@ -662,11 +662,21 @@ def page_admin():
                     st.error("Harap centang konfirmasi dulu.")
             else:
                 st.error("PIN Salah.")
+                
+    with tab4:
+        st.header("🔧 Debugging & Cache Maintenance")
+        st.caption("Gunakan ini hanya jika Anda mendapat error aneh setelah mengganti Kunci API atau RLS.")
+        if st.button("🗑️ HAPUS SEMUA CACHE STREAMLIT", type="secondary"):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.success("Cache Data dan Koneksi berhasil dihapus! Aplikasi akan di-refresh.")
+            st.rerun()
+
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.7", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.7")
+    st.set_page_config(page_title="GR Validation v1.10", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.10")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
