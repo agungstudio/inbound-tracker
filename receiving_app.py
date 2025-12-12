@@ -7,7 +7,7 @@ import io
 import json
 import logging
 from postgrest.exceptions import APIError
-from openpyxl.styles import PatternFill, Font, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment
 import uuid
 
 # --- KONFIGURASI [v1.27 - Multi-Store & DB Operator Management] ---
@@ -60,12 +60,13 @@ def get_stores():
 @st.cache_data(ttl=60)
 def get_operators_by_store(store_name=None):
     """Mengambil daftar Operator berdasarkan Cabang yang aktif"""
-    query = supabase.table(OPERATORS_TABLE).select("operator_name", "id", "store_name", "is_active").eq("is_active", True)
-    if store_name:
+    query = supabase.table(OPERATORS_TABLE).select("operator_name", "id", "store_name", "is_active")
+    if store_name and store_name != "-- Pilih Cabang --":
         query = query.eq("store_name", store_name)
+    query = query.eq("is_active", True).order("operator_name")
     
     try:
-        res = query.order("operator_name").execute()
+        res = query.execute()
         return pd.DataFrame(res.data)
     except Exception as e:
         logging.error(f"Error fetching operators: {e}")
@@ -157,7 +158,7 @@ def convert_df_to_excel(df, sheet_name='Data_Receiving'):
     
     # --- END FIX V1.26 ---
     
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+    with pd.ExcelWriter(output, engine='openypxl') as writer:
         df_final.to_excel(writer, index=False, sheet_name=sheet_name)
         worksheet = writer.sheets[sheet_name]
         
