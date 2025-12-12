@@ -421,7 +421,8 @@ def page_checker():
             notes_key = f"notes_non_{item_id}"
             current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
             
-            with st.expander(header_text, expanded=selisih_po != 0 and default_qty == 0):
+            # Perubahan: expanded=False (Tertutup secara default)
+            with st.expander(header_text, expanded=False):
                 col_info, col_input = st.columns([1.5, 1.5])
                 
                 with col_info:
@@ -472,7 +473,8 @@ def page_checker():
             
             current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
 
-            with st.expander(header_text, expanded=selisih_po != 0):
+            # Perubahan: expanded=False (Tertutup secara default)
+            with st.expander(header_text, expanded=False):
                 
                 # --- INPUT SN BARU ---
                 st.markdown("##### 📝 Input/Scan Serial Number (SN)")
