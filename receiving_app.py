@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 from supabase import create_client
@@ -9,7 +10,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.6 - Debugging RLS Cache] ---
+# --- KONFIGURASI [v1.7 - Final API Error Catch] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -329,7 +330,7 @@ def handle_update_sn_list(row, new_sn_list, new_jenis, nama_user, loaded_time, k
             supabase.table(RECEIVING_TABLE).update(payload_to_db).eq("id", id_barang).execute()
             return 1, False # Success
         except APIError as api_e:
-            # FIX: Tampilkan pesan API error spesifik dari Supabase
+            # FIX v1.7: Tampilkan pesan API error spesifik dari Supabase
             error_msg = f"API Error: {api_e.message}" if hasattr(api_e, 'message') else str(api_e)
             st.error(f"❌ Gagal Simpan Item SN {row['nama_barang']}. Detail: {error_msg}")
             return 0, True 
@@ -662,8 +663,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.6", page_icon="📦", layout="wide")
-    st.sidebar.title("GR Validation Apps v1.6")
+    st.set_page_config(page_title="GR Validation v1.7", page_icon="📦", layout="wide")
+    st.sidebar.title("GR Validation Apps v1.7")
     st.sidebar.success(f"Sesi Aktif: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
