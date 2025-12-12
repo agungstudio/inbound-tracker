@@ -9,7 +9,7 @@ import logging
 from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v1.24 - Robust Filtering Fix] ---
+# --- KONFIGURASI [v1.25 - Enhanced Excel Styles] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 DAFTAR_CHECKER = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Koordinator"]
@@ -70,18 +70,21 @@ def convert_df_to_excel(df, sheet_name='Data_Receiving'):
         df_export.to_excel(writer, index=False, sheet_name=sheet_name)
         worksheet = writer.sheets[sheet_name]
         
-        blibli_blue_fill = PatternFill(start_color="0095DA", end_color="0095DA", fill_type="solid")
-        white_bold_font = Font(color="FFFFFF", bold=True, size=11)
-        center_align = Alignment(horizontal='center', vertical='center')
+        # FIX V1.25: Gaya header yang lebih menarik
+        HEADER_FILL = PatternFill(start_color="0072b2", end_color="0072b2", fill_type="solid") # Darker Blue
+        HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
+        HEADER_ALIGNMENT = Alignment(horizontal='center', vertical='center', wrap_text=True)
         
         for cell in worksheet[1]:
-            cell.fill = blibli_blue_fill
-            cell.font = white_bold_font
-            cell.alignment = center_align
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = HEADER_ALIGNMENT
             
+        # Atur lebar kolom
         for column_cells in worksheet.columns:
             length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
+            # Menetapkan lebar kolom minimum yang lebih lebar
+            worksheet.column_dimensions[column_cells[0].column_letter].width = max(length + 5, 15)
             
     return output.getvalue()
 
@@ -254,9 +257,21 @@ def get_master_template_excel_receiving():
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Template_Master_GR')
         worksheet = writer.sheets['Template_Master_GR']
+        
+        # FIX V1.25: Gaya header yang lebih menarik
+        HEADER_FILL = PatternFill(start_color="0072b2", end_color="0072b2", fill_type="solid") # Darker Blue
+        HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
+        HEADER_ALIGNMENT = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        
+        for cell in worksheet[1]:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = HEADER_ALIGNMENT
+            
         for column_cells in worksheet.columns:
             length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
+            worksheet.column_dimensions[column_cells[0].column_letter].width = max(length + 5, 15)
+            
     return output.getvalue()
 
 
@@ -1051,9 +1066,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.24", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.25", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.24")
+    st.sidebar.title("GR Validation Apps v1.25")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
