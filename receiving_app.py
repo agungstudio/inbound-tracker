@@ -10,7 +10,7 @@ from postgrest.exceptions import APIError
 from openpyxl.styles import PatternFill, Font, Alignment
 import uuid
 
-# --- KONFIGURASI [v1.28 - Single Store Operator Management] ---
+# --- KONFIGURASI [v1.29 - Fix Operator KeyError] ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 RESET_PIN = "123456" 
@@ -44,18 +44,25 @@ def init_connection():
 supabase = init_connection()
 
 # --- FUNGSI BARU: MANAJEMEN OPERATOR DARI DB ---
-# FIX V1.28: Tidak lagi memerlukan 'store_name'
+# FIX V1.29: Memastikan DF yang dikembalikan memiliki kolom yang benar
 @st.cache_data(ttl=60)
 def get_all_operators():
     """Mengambil SEMUA Operator aktif secara global"""
     query = supabase.table(OPERATORS_TABLE).select("operator_name", "id", "is_active").eq("is_active", True).order("operator_name")
+    expected_cols = ["operator_name", "id", "is_active"]
     
     try:
         res = query.execute()
-        return pd.DataFrame(res.data)
+        df = pd.DataFrame(res.data)
+        
+        if df.empty:
+            return pd.DataFrame(columns=expected_cols)
+
+        return df
     except Exception as e:
         logging.error(f"Error fetching operators: {e}")
-        return pd.DataFrame()
+        # Return empty DF with expected columns structure on error
+        return pd.DataFrame(columns=expected_cols)
 
 # --- FUNGSI HELPER WAKTU & KONVERSI ---
 def parse_supabase_timestamp(timestamp_str):
@@ -1245,9 +1252,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="GR Validation v1.28", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="GR Validation v1.29", page_icon="📦", layout="wide")
     # FIX V1.19: Sidebar hanya menampilkan Nama Aplikasi dan Navigasi
-    st.sidebar.title("GR Validation Apps v1.28")
+    st.sidebar.title("GR Validation Apps v1.29")
     menu = st.sidebar.radio("Navigasi", ["Checker Input", "Admin Panel"])
     if menu == "Checker Input": page_checker()
     elif menu == "Admin Panel":
